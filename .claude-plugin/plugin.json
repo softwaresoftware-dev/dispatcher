@@ -1,0 +1,46 @@
+{
+  "name": "dispatcher",
+  "description": "Event-routing provider. Installs dispatcher-ingress as a managed daemon, exposing a public webhook that routes events to sessions or spawns ephemeral agents. Hands off to taskpilot for spawn:recipe targets and to session-bridge for session targets.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Thatcher",
+    "url": "https://github.com/softwaresoftware-dev"
+  },
+  "repository": "https://github.com/softwaresoftware-dev/dispatcher",
+  "keywords": [
+    "dispatcher",
+    "webhook",
+    "router",
+    "events",
+    "ingress"
+  ],
+  "userConfig": {
+    "bearer_token": {
+      "type": "string",
+      "description": "Bearer token required on every ingress POST. Generate with: openssl rand -hex 32",
+      "required": true,
+      "sensitive": true
+    },
+    "install_dir": {
+      "type": "directory",
+      "description": "Where dispatcher-ingress is cloned and run from",
+      "required": false,
+      "default": "~/.dispatcher",
+      "sensitive": false
+    },
+    "port": {
+      "type": "number",
+      "description": "Port for dispatcher to listen on. Default 8911.",
+      "required": false,
+      "default": 8911,
+      "sensitive": false
+    },
+    "session_bridge_url": {
+      "type": "string",
+      "description": "URL of the local session-bridge HTTP server. Used to forward events to named sessions.",
+      "required": false,
+      "default": "http://127.0.0.1:8910",
+      "sensitive": false
+    }
+  }
+}
