@@ -3,7 +3,7 @@
   "description": "Event-routing provider. Installs dispatcher-ingress as a managed daemon, exposing a public webhook that routes events to sessions or spawns ephemeral agents. Hands off to taskpilot for spawn:recipe targets and to session-bridge for session targets.",
   "version": "0.1.0",
   "author": {
-    "name": "Thatcher",
+    "name": "NOV LLC",
     "url": "https://github.com/softwaresoftware-dev"
   },
   "repository": "https://github.com/softwaresoftware-dev/dispatcher",
