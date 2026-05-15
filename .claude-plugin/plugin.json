@@ -17,12 +17,14 @@
   "userConfig": {
     "bearer_token": {
       "type": "string",
+      "title": "Ingress bearer token",
       "description": "Bearer token required on every ingress POST. Generate with: openssl rand -hex 32",
       "required": true,
       "sensitive": true
     },
     "install_dir": {
       "type": "directory",
+      "title": "Install directory",
       "description": "Where dispatcher-ingress is cloned and run from",
       "required": false,
       "default": "~/.dispatcher",
@@ -30,6 +32,7 @@
     },
     "port": {
       "type": "number",
+      "title": "Ingress port",
       "description": "Port for dispatcher to listen on. Default 8911.",
       "required": false,
       "default": 8911,
@@ -37,6 +40,7 @@
     },
     "session_bridge_url": {
       "type": "string",
+      "title": "Session-bridge URL",
       "description": "URL of the local session-bridge HTTP server. Used to forward events to named sessions.",
       "required": false,
       "default": "http://127.0.0.1:8910",
