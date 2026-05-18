@@ -1,0 +1,14 @@
+agent: example@1.0.0
+
+trigger:
+  source: example-source
+
+policy:
+  model: sonnet
+  kind: task
+
+inputs:
+  topic: onboarding
+
+scope:
+  notification: "#team"

@@ -1,0 +1,18 @@
+# Deployment binding for the beats-dj agent — softwaresoftware's lofi station.
+#
+# The agent (agents/beats-dj.agent.md) is host-agnostic. This binding wires it
+# to one deployment: the trigger, the execution policy. `playing` and `queued`
+# are not set here — they arrive in each event's payload.
+
+agent: beats-dj@1.0.0
+
+trigger:
+  source: beats-dj              # the stream server pushes state every ~30s
+
+policy:
+  model: sonnet
+  kind: service                 # long-lived — the stream is continuous
+
+# The `beats` MCP is configured per host with the stream server's endpoint and
+# DJ key; the agent never sees the key. Capabilities: none — beats-dj is a
+# pure composer that talks to exactly one system through one MCP.

@@ -1,34 +1,73 @@
 # CLAUDE.md — dispatcher
 
-Provider plugin for the `event-routing` capability. Wraps the upstream `dispatcher-ingress` FastAPI service (`softwaresoftware-dev/dispatcher-ingress`) as a managed daemon installed on the customer's machine.
+Provider plugin for the `event-routing` capability. It **bundles** the
+dispatcher-ingress service — a FastAPI webhook receiver — and runs it as a
+managed daemon. The plugin is the whole dispatcher: skills, service, the
+agent-definition contract, and seed agents, in one repo.
+
+## Structure
+
+| Path | What |
+|------|------|
+| `skills/` | `setup`, `route`, `validate-agent` |
+| `app/` | the dispatcher-ingress service (FastAPI: ingress, routing, audit, spawn helper) |
+| `lib/agent_def.py` | the agent-definition format contract + validator (also a CLI) |
+| `agents/` | seed agent definitions (`<name>.agent.md` + `<name>.binding.yaml`) |
+| `tests/` | pytest suite — `api`, `channels`, `spawn`, `agent_def` |
 
 ## What it does
 
-- Installs dispatcher-ingress (clones the repo, creates a venv, installs deps)
-- Generates a default `channels.yaml` routing table
-- Registers the service with the `daemon` capability provider so it survives reboots
-- Exposes ingress on the configured port; the service expects a bearer token on every POST
-- Routes events: deterministic (`(source, event_type) → target`) when channels.yaml matches, LLM-routed via the dispatcher session otherwise
+- Runs the bundled dispatcher-ingress service as a managed daemon (via the
+  `daemon` capability) — reboot-persistent.
+- Generates a default `channels.yaml` routing table.
+- Exposes ingress on the configured port; every POST needs a bearer token.
+- Routes events: deterministic (`(source, event_type) → target`) when
+  `channels.yaml` matches, LLM-routed via the dispatcher session otherwise.
 
 ## Capability contract
 
-Provides: `event-routing`. Consumer plugins (e.g. mindframe) declare `requires: ["event-routing"]` and use the dispatcher's HTTP API to register routes and POST events. The contract is HTTP, not skill-based — anything that speaks the same `/api/event` shape can substitute (Inngest, Temporal, AWS EventBridge, a customer's existing webhook router).
+Provides `event-routing`. Consumers (e.g. mindframe) declare
+`requires: ["event-routing"]` and use the HTTP API to register routes and POST
+events. The contract is HTTP, not skill-based — anything speaking the same
+`/api/event` shape can substitute.
 
-## Hard dependencies on other capabilities
+Depends on: `daemon` (run the service), `agent-spawning` (taskpilot's
+`spawner_cli.py` is the `spawn:<recipe>` target), `session-mesh` (session-bridge
+is the `session:<name>` target). Optional: `deploy` (public HTTPS ingress).
 
-- `daemon` — to run dispatcher-ingress as a managed background service
-- `agent-spawning` — taskpilot's `spawner_cli.py` is the target for `spawn:<recipe>` routes
-- `session-mesh` — session-bridge is the target for `session:<name>` routes
+## The service
 
-## Optional
+- FastAPI + uvicorn + SQLite (WAL) audit log. Default port `8911`.
+- Endpoints: `GET /api/health` (no auth), `POST /api/event` (bearer, LLM/static
+  routed), `POST /api/direct/{session}` (bearer, explicit forward),
+  `GET /api/events` + `/api/events/summary` (bearer, audit log).
+- Env: `DISPATCHER_INGEST_TOKEN`, `SESSION_BRIDGE_URL`,
+  `DISPATCHER_CHANNELS_FILE`, `DISPATCHER_RECIPES_DIR`,
+  `DISPATCHER_DEDUPE_WINDOW_MINUTES`.
+- **Static routing** (`channels.yaml`): each route maps `(source, event_type)`
+  to `session:<name>` or `spawn:<recipe>`; first match wins; re-read per request.
+- **Idempotency**: `/api/event` dedupes on `<source>:<event_id>` within the
+  dedupe window. `/api/direct` is not deduped.
+- **Audit**: every ingest writes a row to `~/.dispatcher/events.db`. A global
+  exception handler also writes synthetic `_internal` rows for uncaught errors.
 
-- `deploy` — when present, `/dispatcher:setup` can put the dispatcher behind a public HTTPS URL (Nginx + Cloudflare Tunnel). Without it, the dispatcher is reachable only on the local network or via the customer's own ingress.
+## Runtime layout
+
+`$INSTALL_DIR` (default `~/.dispatcher`) holds runtime state — the venv,
+`channels.yaml`, `recipes/`, `agents/`, and the audit DB. The service *code*
+lives in this plugin (`${CLAUDE_PLUGIN_ROOT}/app/`).
+
+## Commands
+
+```bash
+make start    # uvicorn app.main:app on port 8911
+make stop
+make status
+make test     # pytest tests/
+```
 
 ## Skills
 
-- `/dispatcher:setup` — install + start the daemon on this machine
-- `/dispatcher:route` — add a route to channels.yaml without hand-editing
-
-## What's NOT here
-
-- The dispatcher service code itself — that lives in `softwaresoftware-dev/dispatcher-ingress`. This plugin clones that repo at install time. Keeping them separate means dispatcher-ingress can be deployed as a standalone service in non-Claude contexts (k8s, CI, etc.).
+- `/dispatcher:setup` — install + start the daemon on this machine.
+- `/dispatcher:route` — add a route to `channels.yaml`.
+- `/dispatcher:validate-agent` — validate an `.agent.md` against the contract.

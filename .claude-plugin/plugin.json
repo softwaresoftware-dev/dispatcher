@@ -1,7 +1,7 @@
 {
   "name": "dispatcher",
-  "description": "Event-routing provider. Installs dispatcher-ingress as a managed daemon, exposing a public webhook that routes events to sessions or spawns ephemeral agents. Hands off to taskpilot for spawn:recipe targets and to session-bridge for session targets.",
-  "version": "0.1.0",
+  "description": "Event-routing provider. Bundles and runs the dispatcher-ingress webhook service as a managed daemon, routing events to sessions or spawning ephemeral agents. Hands off to taskpilot for spawn:recipe targets and to session-bridge for session targets.",
+  "version": "0.2.0",
   "author": {
     "name": "NOV LLC",
     "url": "https://github.com/softwaresoftware-dev"
@@ -24,8 +24,8 @@
     },
     "install_dir": {
       "type": "directory",
-      "title": "Install directory",
-      "description": "Where dispatcher-ingress is cloned and run from",
+      "title": "Runtime directory",
+      "description": "Runtime state directory — venv, channels.yaml, recipes, agents, and the audit DB. The service code is bundled in the plugin.",
       "required": false,
       "default": "~/.dispatcher",
       "sensitive": false
