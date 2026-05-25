@@ -14,7 +14,12 @@ from app.spawn_helper import _resolve_mindframe_spawn_cli
 
 @pytest.fixture
 def fake_home(tmp_path, monkeypatch):
+    """Redirect Path.home() to a tmpdir on every platform.
+
+    Path.home() reads HOME on POSIX and USERPROFILE on Windows, so we have
+    to set both for the same fixture body to work cross-platform."""
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.delenv("MINDFRAME_SPAWN_CLI", raising=False)
     return tmp_path
 
