@@ -33,13 +33,48 @@ DEFAULT_SPAWNER_CLI = os.environ.get(
     "TASKPILOT_SPAWNER_CLI",
     str(Path.home() / "projects" / "softwaresoftware" / "projects" / "plugins" / "providers" / "taskpilot" / "spawner_cli.py"),
 )
-# When a recipe declares a `frame:` block, dispatcher shells out to this CLI
-# to create the mindframe (mkdir + meta.json + seed block) before spawning
-# the agent. The CLI emits one JSON object on stdout: {ok, id, frame_dir, url}.
-DEFAULT_MINDFRAME_SPAWN_CLI = os.environ.get(
-    "MINDFRAME_SPAWN_CLI",
-    str(Path.home() / "projects" / "softwaresoftware" / "projects" / "plugins" / "frameworks" / "mindframe" / "lib" / "spawn.py"),
-)
+
+
+# When a recipe declares a `frame:` block, dispatcher shells out to mindframe's
+# spawn CLI to create the mindframe (mkdir + meta.json + seed block) before
+# spawning the agent. Discovery order:
+#   1. $MINDFRAME_SPAWN_CLI env (explicit override — install skill sets this)
+#   2. The marketplace cache at ~/.claude/plugins/cache/<marketplace>/mindframe/<version>/lib/spawn.py
+#      — pick the highest version directory found
+#   3. None — spawn_recipe returns a clear error when this happens for a
+#      `frame:`-declaring recipe
+# No hardcoded dev paths — the resolver-installed plugin tree is the source
+# of truth, per the projects/CLAUDE.md no-hardcoded-paths rule.
+
+def _resolve_mindframe_spawn_cli() -> str | None:
+    """Locate the mindframe spawn CLI. Returns the absolute path or None.
+    Called per-spawn rather than at module import so a fresh install
+    (or an env override) takes effect without a dispatcher restart."""
+    explicit = os.environ.get("MINDFRAME_SPAWN_CLI", "").strip()
+    if explicit:
+        return explicit if Path(explicit).is_file() else None
+
+    cache = Path.home() / ".claude" / "plugins" / "cache"
+    if not cache.is_dir():
+        return None
+
+    candidates: list[tuple[str, Path]] = []
+    for marketplace_dir in cache.iterdir():
+        mf_root = marketplace_dir / "mindframe"
+        if not mf_root.is_dir():
+            continue
+        for version_dir in mf_root.iterdir():
+            cli = version_dir / "lib" / "spawn.py"
+            if cli.is_file():
+                candidates.append((version_dir.name, cli))
+    if not candidates:
+        return None
+    # Highest version wins. Versions are semver-shaped strings ("0.4.0");
+    # lex sort works for the cases we ship.
+    candidates.sort(reverse=True)
+    return str(candidates[0][1])
+
+
 SPAWN_TIMEOUT_SEC = int(os.environ.get("DISPATCHER_SPAWN_TIMEOUT_SEC", "120"))
 FRAME_SPAWN_TIMEOUT_SEC = int(os.environ.get("DISPATCHER_FRAME_SPAWN_TIMEOUT_SEC", "15"))
 
@@ -264,13 +299,20 @@ async def spawn_recipe(
     frame_dir: str | None = None
     mindframe_url: str | None = None
     if isinstance(frame_block, dict):
+        resolved_mf_cli = mindframe_spawn_cli or _resolve_mindframe_spawn_cli()
+        if not resolved_mf_cli:
+            return {"ok": False, "error": (
+                "Recipe declares `frame:` but the mindframe spawn CLI was not "
+                "found. Install mindframe (`/softwaresoftware:install mindframe`), "
+                "or set $MINDFRAME_SPAWN_CLI to an absolute path."
+            )}
         frame_res = await _create_mindframe(
             frame_block=frame_block,
             brief_overrides=brief_overrides or {},
             event_id=event_id,
             task_id=task_id,
             optional_keys=optional_keys,
-            mindframe_spawn_cli=mindframe_spawn_cli or DEFAULT_MINDFRAME_SPAWN_CLI,
+            mindframe_spawn_cli=resolved_mf_cli,
         )
         if not frame_res["ok"]:
             return {"ok": False, "error": frame_res["error"]}
