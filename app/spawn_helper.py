@@ -13,6 +13,7 @@ import asyncio
 import json
 import os
 import re
+import sys
 import tempfile
 from pathlib import Path
 
@@ -188,7 +189,7 @@ async def _create_mindframe(
         "recipe": task_id,
     }
     args = [
-        "python3", mindframe_spawn_cli,
+        sys.executable, mindframe_spawn_cli,
         "--title", str(title),
         "--spawned-by-json", json.dumps(spawned_by),
     ]
@@ -359,7 +360,7 @@ async def spawn_recipe(
     )
 
     args = [
-        "python",
+        sys.executable,
         spawner_cli or DEFAULT_SPAWNER_CLI,
         description,
         "--name", task_id,
