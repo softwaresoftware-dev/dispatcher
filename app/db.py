@@ -4,8 +4,14 @@ import os
 import sqlite3
 from contextlib import contextmanager
 
-DATA_DIR = os.path.expanduser("~/.dispatcher")
-DB_PATH = os.path.join(DATA_DIR, "events.db")
+# Allow tests / non-default deployments to override. Env precedence:
+#   DISPATCHER_DB_PATH=full/path/to/events.db      (highest)
+#   DISPATCHER_DATA_DIR=/path/to/dir               (events.db inside)
+#   default: ~/.dispatcher/events.db
+DATA_DIR = os.environ.get(
+    "DISPATCHER_DATA_DIR", os.path.expanduser("~/.dispatcher"))
+DB_PATH = os.environ.get(
+    "DISPATCHER_DB_PATH", os.path.join(DATA_DIR, "events.db"))
 
 BASE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
