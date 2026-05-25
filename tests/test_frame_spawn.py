@@ -17,10 +17,31 @@ import pytest
 from app.spawn_helper import _create_mindframe
 
 
-PLUGINS_ROOT = Path(__file__).resolve().parents[3]  # tests → dispatcher → providers → plugins
-MINDFRAME_SPAWN_CLI = (
-    PLUGINS_ROOT / "frameworks" / "mindframe" / "lib" / "spawn.py"
-)
+def _find_mindframe_spawn_cli() -> Path | None:
+    """Locate mindframe's spawn CLI across the layouts the test suite
+    might be invoked from:
+      1. $MINDFRAME_SPAWN_CLI explicit env override
+      2. Sibling checkout — ../mindframe/lib/spawn.py (CI clones siblings)
+      3. Monorepo dev layout — ../../frameworks/mindframe/lib/spawn.py
+    """
+    explicit = os.environ.get("MINDFRAME_SPAWN_CLI")
+    if explicit and Path(explicit).is_file():
+        return Path(explicit)
+    here = Path(__file__).resolve()
+    # tests/test_frame_spawn.py → tests → dispatcher
+    dispatcher_root = here.parents[1]
+    # Sibling: <parent>/dispatcher and <parent>/mindframe
+    sibling = dispatcher_root.parent / "mindframe" / "lib" / "spawn.py"
+    if sibling.is_file():
+        return sibling
+    # Dev monorepo: plugins/providers/dispatcher and plugins/frameworks/mindframe
+    monorepo = dispatcher_root.parent.parent / "frameworks" / "mindframe" / "lib" / "spawn.py"
+    if monorepo.is_file():
+        return monorepo
+    return None
+
+
+MINDFRAME_SPAWN_CLI = _find_mindframe_spawn_cli()
 
 
 @pytest.fixture
@@ -35,8 +56,9 @@ def fake_frames_root(tmp_path, monkeypatch):
 
 @pytest.fixture
 def has_mindframe_cli():
-    if not MINDFRAME_SPAWN_CLI.exists():
-        pytest.skip(f"mindframe spawn CLI not found at {MINDFRAME_SPAWN_CLI}")
+    if MINDFRAME_SPAWN_CLI is None or not MINDFRAME_SPAWN_CLI.is_file():
+        pytest.skip("mindframe spawn CLI not found — set $MINDFRAME_SPAWN_CLI or "
+                    "check out mindframe as a sibling of dispatcher")
 
 
 def _run(coro):
