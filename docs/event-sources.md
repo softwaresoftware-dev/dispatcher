@@ -54,12 +54,24 @@ Two adapters can both provide the same capability — one poll-only, one webhook
 An Adapter is a Python module discovered by capability. It implements either or both of:
 
 ```python
-def pull(scope: dict, cursor: dict | None) -> tuple[list[Event], dict]:
-    """Fetch events newer than `cursor`. Return (events, new_cursor).
+@dataclass
+class PullResult:
+    events: list[Event]
+    new_cursor: dict
+    next_tick_hint_s: int | None = None   # upstream's recommended cadence, e.g. X-Poll-Interval
+
+def pull(scope: dict, cursor: dict | None) -> PullResult:
+    """Fetch events newer than `cursor`. Return events + new cursor + optional
+    upstream-recommended next tick.
 
     `cursor` is opaque to the dispatcher — adapters define their own shape
     (last_event_id, etag, timestamp, whatever the upstream API exposes).
     Empty `cursor` means "we just enrolled — go-forward only, do not backfill."
+
+    `next_tick_hint_s` is the upstream system's published cadence (GitHub's
+    X-Poll-Interval header, Slack's Retry-After on 429, etc.). The runtime
+    uses max(configured_tick, next_tick_hint_s) so the upstream's pacing
+    contract is always respected.
     """
 
 def handle_push(payload: dict, headers: dict) -> list[Event]:
@@ -93,6 +105,8 @@ Two transports, both first-class, both feeding the same routing table.
 Driven by the dispatcher's **poller runtime** — a single scheduler inside the daemon that, for each Event Source with poll enabled, runs an adapter's `pull()` on a tick.
 
 - Default tick: **60s**. Configurable per source (`tick: 30s` in the YAML). Per-source minimum enforced by the adapter (GitHub etag-based polling can go to 10s safely; Sentry public REST API should not).
+- **Honor upstream pacing hints.** Well-behaved APIs publish a recommended poll cadence (GitHub: `X-Poll-Interval` response header, Slack: `Retry-After` on 429, etc.). The adapter returns a `next_tick_hint` alongside events; the runtime widens the tick to the larger of `configured_tick` and `next_tick_hint`. The upstream contract wins over the operator's preference whenever the upstream is being polite.
+- **Conditional requests are the primary cheap-tick mechanism, not an optimization.** Most well-designed APIs let you ask "has it changed since cursor X?" in a way that returns nothing-but-headers when the answer is no — and crucially, doesn't burn rate-limit budget. ETag + `If-None-Match` (GitHub, most REST APIs), `?since=<ts>` query (Sentry), `historyId` (Gmail). The adapter stores the conditional-request token *inside* the cursor and uses it on the next call. Idle ticks cost zero quota.
 - The runtime supervises pollers like the taskpilot daemon supervises tasks — crash → log → restart with backoff.
 - Cursor lives in `~/.dispatcher/cursors.db` (SQLite) keyed by event-source name. The dispatcher owns durability; adapters are stateless between calls.
 
@@ -120,6 +134,8 @@ Dedupe:
 
 - `<source>:<event_id>` within `DISPATCHER_DEDUPE_WINDOW_MINUTES`. Already exists. Reused unchanged.
 - Adapters must produce stable `event_id`s — for GitHub that's the X-GitHub-Delivery (push) or the event id in the events API (poll). For systems with no stable id, hash a canonical subset of the payload.
+
+**ID comparison hazard.** Several upstream APIs return numeric event ids encoded as JSON strings ("12553207924"). Adapters must compare them as the upstream-native type — int for GitHub events, ISO-8601 for time-based cursors, lexicographic for Slack timestamps with sub-second precision. String-comparing variable-length digit strings silently breaks the day an id grows a digit. Adapter author guide repeats this; tests should cover the cross-boundary case.
 
 ## Initial state
 
