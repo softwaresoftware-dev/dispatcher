@@ -13,7 +13,7 @@ from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from . import channels, db, spawn_helper
+from . import channels, db, pollers, spawn_helper
 
 log = logging.getLogger("dispatcher-ingress")
 
@@ -171,8 +171,21 @@ async def _forward_to_session(session: str, text: str) -> dict:
 
 
 @app.on_event("startup")
-def startup():
+async def startup():
     db.init_db()
+    # Adapter plugins register themselves at import time. Imports are kept
+    # narrowly inside startup so a missing optional adapter never blocks
+    # boot — the runtime no-ops on systems with no registered adapter.
+    try:
+        from . import adapters_bootstrap  # noqa: F401
+    except ImportError:
+        pass
+    await pollers.start_runtime()
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    await pollers.stop_runtime()
 
 
 @app.get("/api/health")
