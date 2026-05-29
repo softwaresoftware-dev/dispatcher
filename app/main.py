@@ -170,8 +170,25 @@ async def _forward_to_session(session: str, text: str) -> dict:
         return resp.json()
 
 
+def _configure_logging() -> None:
+    """Make our log records visible under systemd / launchd.
+
+    Python's logging library is silent by default — a fresh root logger has
+    no handler, so `log.info(...)` calls drop on the floor. Uvicorn configures
+    its OWN loggers (uvicorn, uvicorn.error, uvicorn.access) but never touches
+    root, so our `dispatcher.*` namespace stays invisible until we wire it.
+    basicConfig is a no-op if root already has a handler, so calling it
+    repeatedly is safe.
+    """
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(name)s [%(levelname)s] %(message)s",
+    )
+
+
 @app.on_event("startup")
 async def startup():
+    _configure_logging()
     db.init_db()
     # Adapter plugins register themselves at import time. Imports are kept
     # narrowly inside startup so a missing optional adapter never blocks
