@@ -39,11 +39,20 @@ class Adapter(Protocol):
 
     ``system`` identifies the capability the adapter provides:
     ``event-source:<system>``. Plugin sets this on registration.
+
+    ``credentials`` is an opaque dict resolved by the runtime from the
+    Event Source's ``credentials_ref``. Shape is adapter-defined
+    (e.g. ``{"token": "ghp_..."}`` for GitHub). An empty dict signals
+    "no managed credentials configured" — adapters MAY fall back to
+    environment variables for the dev-machine case.
     """
     system: str
 
     async def pull(
-        self, scope: dict[str, Any], cursor: dict[str, Any] | None
+        self,
+        scope: dict[str, Any],
+        cursor: dict[str, Any] | None,
+        credentials: dict[str, Any],
     ) -> PullResult: ...
 
 

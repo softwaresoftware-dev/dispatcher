@@ -122,7 +122,7 @@ def test_registry_register_and_lookup(isolated_dispatcher_dir):
     @dataclass
     class StubAdapter:
         system: str = "stub"
-        async def pull(self, scope, cursor):
+        async def pull(self, scope, cursor, credentials):
             return PullResult()
 
     registry.register_adapter(StubAdapter())
@@ -135,7 +135,7 @@ def test_registry_rejects_adapter_without_system(isolated_dispatcher_dir):
     from app.pollers import registry
 
     class Bad:
-        async def pull(self, scope, cursor):
+        async def pull(self, scope, cursor, credentials):
             return None
 
     with pytest.raises(ValueError):
@@ -152,12 +152,12 @@ async def test_runtime_supervised_tick_persists_cursor(isolated_dispatcher_dir, 
 
     cursors.init_db()
 
-    seen: list[dict | None] = []
+    seen: list[tuple] = []
 
     class StubAdapter:
         system = "stub"
-        async def pull(self, scope, cursor):
-            seen.append(cursor)
+        async def pull(self, scope, cursor, credentials):
+            seen.append((cursor, credentials))
             return PullResult(
                 events=[Event(source="stub", event_type="x.y", event_id="42")],
                 new_cursor={"etag": "W/abc", "last_id": "42"},
@@ -173,8 +173,8 @@ async def test_runtime_supervised_tick_persists_cursor(isolated_dispatcher_dir, 
     monkeypatch.setattr(runtime, "_forward_event", fake_forward)
 
     next_tick = await runtime._one_tick(src, adapter)
-    # cursor was None on first call, then persisted.
-    assert seen == [None]
+    # cursor was None on first call, then persisted; credentials empty (no ref).
+    assert seen == [(None, {})]
     assert cursors.get_cursor("t-src") == {"etag": "W/abc", "last_id": "42"}
     # next_tick_hint widened the runtime sleep above the configured tick.
     assert next_tick == 120
@@ -191,7 +191,7 @@ async def test_runtime_swallows_adapter_exceptions(isolated_dispatcher_dir):
 
     class BrokenAdapter:
         system = "broken"
-        async def pull(self, scope, cursor):
+        async def pull(self, scope, cursor, credentials):
             raise RuntimeError("upstream is down")
 
     src = EventSource(name="brk", system="broken", tick_s=30)

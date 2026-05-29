@@ -152,7 +152,10 @@ class GitHubAdapter:
         return r.status_code, dict(r.headers), body
 
     async def pull(
-        self, scope: dict[str, Any], cursor: dict[str, Any] | None,
+        self,
+        scope: dict[str, Any],
+        cursor: dict[str, Any] | None,
+        credentials: dict[str, Any],
     ) -> PullResult:
         orgs = scope.get("orgs") or []
         if not orgs:
@@ -162,10 +165,16 @@ class GitHubAdapter:
         org = orgs[0]
         url = f"https://api.github.com/orgs/{org}/events?per_page=100"
 
-        token = _resolve_token()
+        # Credentials store is the primary source. The env/CLI/hosts.yml
+        # fallback chain remains so dev machines (and operators who haven't
+        # run the credentials setup yet) keep working.
+        token = (credentials.get("token")
+                 or credentials.get("oauth_token")
+                 or _resolve_token())
         if not token:
             raise RuntimeError(
-                "no GitHub token available — set GITHUB_TOKEN or run `gh auth login`"
+                "no GitHub token available — set credentials_ref on the "
+                "Event Source (preferred), or set GITHUB_TOKEN, or run `gh auth login`"
             )
 
         headers = {

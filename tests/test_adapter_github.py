@@ -91,7 +91,7 @@ async def test_pull_first_call_goes_forward_emits_nothing():
     adapter = GitHubAdapter(fetch=fetch)
 
     result = await adapter.pull(
-        scope={"orgs": ["softwaresoftware-dev"]}, cursor=None,
+        scope={"orgs": ["softwaresoftware-dev"]}, cursor=None, credentials={},
     )
 
     assert result.events == []
@@ -109,7 +109,7 @@ async def test_pull_uses_if_none_match_on_subsequent_call():
     adapter = GitHubAdapter(fetch=fetch)
 
     cursor = {"etag": 'W/"abc"', "last_id": "2"}
-    result = await adapter.pull(scope={"orgs": ["x"]}, cursor=cursor)
+    result = await adapter.pull(scope={"orgs": ["x"]}, cursor=cursor, credentials={})
 
     assert result.events == []
     assert result.new_cursor == cursor  # unchanged
@@ -132,6 +132,7 @@ async def test_pull_emits_only_events_newer_than_cursor():
 
     result = await adapter.pull(
         scope={"orgs": ["x"]}, cursor={"etag": 'W/"old"', "last_id": "3"},
+        credentials={},
     )
 
     assert [e.event_id for e in result.events] == ["4", "5"]  # chronological
@@ -152,6 +153,7 @@ async def test_pull_advances_cursor_even_when_all_events_filtered():
     adapter = GitHubAdapter(fetch=fetch)
     result = await adapter.pull(
         scope={"orgs": ["x"]}, cursor={"etag": 'W/"old"', "last_id": "1"},
+        credentials={},
     )
     assert result.events == []
     assert result.new_cursor["last_id"] == "9"
@@ -172,6 +174,7 @@ async def test_pull_int_overflow_safety():
     result = await adapter.pull(
         scope={"orgs": ["x"]},
         cursor={"etag": 'W/"prev"', "last_id": "12553207924"},
+        credentials={},
     )
     assert [e.event_id for e in result.events] == ["100000000000"]
     assert result.new_cursor["last_id"] == "100000000000"
@@ -181,7 +184,7 @@ async def test_pull_int_overflow_safety():
 async def test_pull_raises_when_no_org_scope():
     """An EventSource with empty scope.orgs returns an empty result with a log."""
     adapter = GitHubAdapter(fetch=FakeFetch([]))
-    result = await adapter.pull(scope={}, cursor=None)
+    result = await adapter.pull(scope={}, cursor=None, credentials={})
     assert result == PullResult()
 
 
@@ -190,7 +193,56 @@ async def test_pull_propagates_non_200_non_304(monkeypatch):
     fetch = FakeFetch([(403, {}, None)])
     adapter = GitHubAdapter(fetch=fetch)
     with pytest.raises(RuntimeError, match="status=403"):
-        await adapter.pull(scope={"orgs": ["x"]}, cursor=None)
+        await adapter.pull(scope={"orgs": ["x"]}, cursor=None, credentials={})
+
+
+@pytest.mark.asyncio
+async def test_pull_uses_credentials_token_first(monkeypatch):
+    """When credentials carry a token, the adapter must use it and never
+    fall back to env/CLI/hosts.yml — that's the whole point of the store."""
+    import app.adapters.github as ga
+
+    def _should_not_be_called():
+        raise AssertionError("_resolve_token must not be called when credentials supply a token")
+    monkeypatch.setattr(ga, "_resolve_token", _should_not_be_called)
+
+    fetch = FakeFetch([(200, {"ETag": 'W/"x"'}, [])])
+    adapter = GitHubAdapter(fetch=fetch)
+    await adapter.pull(
+        scope={"orgs": ["x"]}, cursor=None,
+        credentials={"token": "ghp_from_store"},
+    )
+    assert fetch.requests[0]["headers"]["Authorization"] == "Bearer ghp_from_store"
+
+
+@pytest.mark.asyncio
+async def test_pull_falls_back_when_credentials_empty(monkeypatch):
+    """Empty credentials dict signals 'no managed creds' — fallback chain runs."""
+    import app.adapters.github as ga
+    monkeypatch.setattr(ga, "_resolve_token", lambda: "ghp_from_env")
+
+    fetch = FakeFetch([(200, {"ETag": 'W/"x"'}, [])])
+    adapter = GitHubAdapter(fetch=fetch)
+    await adapter.pull(scope={"orgs": ["x"]}, cursor=None, credentials={})
+    assert fetch.requests[0]["headers"]["Authorization"] == "Bearer ghp_from_env"
+
+
+@pytest.mark.asyncio
+async def test_pull_accepts_oauth_token_alias(monkeypatch):
+    """Some operators paste the value from gh's hosts.yml verbatim into the
+    credentials file, which puts it under `oauth_token`. The adapter should
+    accept either key without forcing a rename."""
+    import app.adapters.github as ga
+    monkeypatch.setattr(ga, "_resolve_token",
+                        lambda: pytest.fail("fallback should not run"))
+
+    fetch = FakeFetch([(200, {"ETag": 'W/"x"'}, [])])
+    adapter = GitHubAdapter(fetch=fetch)
+    await adapter.pull(
+        scope={"orgs": ["x"]}, cursor=None,
+        credentials={"oauth_token": "ghp_via_alias"},
+    )
+    assert fetch.requests[0]["headers"]["Authorization"] == "Bearer ghp_via_alias"
 
 
 @pytest.mark.asyncio
@@ -203,4 +255,50 @@ async def test_pull_raises_without_token(monkeypatch):
 
     adapter = GitHubAdapter(fetch=FakeFetch([]))
     with pytest.raises(RuntimeError, match="no GitHub token"):
-        await adapter.pull(scope={"orgs": ["x"]}, cursor=None)
+        await adapter.pull(scope={"orgs": ["x"]}, cursor=None, credentials={})
+
+
+# ---------- _resolve_token fallback chain ----------
+
+def test_resolve_token_rejects_stderr_leak(monkeypatch, tmp_path):
+    """The original bug: a failed `gh auth token` call's stderr ended up
+    stuffed into the Authorization header. Defensive check: reject any
+    token-shaped output that contains spaces or newlines.
+    """
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    # No hosts.yml either.
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    import subprocess
+    from app.adapters import github as ga
+
+    class FakeCompleted:
+        def __init__(self):
+            self.returncode = 1
+            self.stdout = 'unknown command "token" for "gh auth"\n\nUsage: gh auth ...'
+            self.stderr = ""
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: FakeCompleted())
+    assert ga._resolve_token() is None
+
+
+def test_resolve_token_reads_hosts_yml(monkeypatch, tmp_path):
+    """Last-resort fallback: parse ~/.config/gh/hosts.yml directly."""
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    cfg = tmp_path / ".config" / "gh"
+    cfg.mkdir(parents=True)
+    (cfg / "hosts.yml").write_text(
+        "github.com:\n  oauth_token: ghp_from_hosts_yml\n  user: foo\n",
+    )
+
+    import subprocess
+    monkeypatch.setattr(subprocess, "run",
+                        lambda *a, **kw: subprocess.CompletedProcess(
+                            args=a[0], returncode=1, stdout="", stderr=""))
+
+    from app.adapters import github as ga
+    assert ga._resolve_token() == "ghp_from_hosts_yml"

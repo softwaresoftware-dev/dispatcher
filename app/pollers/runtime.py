@@ -22,6 +22,7 @@ from typing import Any
 
 import httpx
 
+from .. import credentials as credentials_store
 from . import cursors, registry, sources
 from .types import Event, EventSource, PullResult
 
@@ -105,11 +106,13 @@ async def _supervised_tick(src: EventSource, adapter: Any) -> None:
 
 
 async def _one_tick(src: EventSource, adapter: Any) -> int:
-    """Single tick: load cursor, pull, persist new cursor, forward events.
-    Returns the sleep duration for the next tick (respecting upstream hints).
+    """Single tick: load cursor + credentials, pull, persist new cursor,
+    forward events. Returns the sleep duration for the next tick
+    (respecting upstream hints).
     """
     cursor = cursors.get_cursor(src.name)
-    result: PullResult = await adapter.pull(src.scope, cursor)
+    creds = credentials_store.get(src.credentials_ref)
+    result: PullResult = await adapter.pull(src.scope, cursor, creds)
 
     # Filter by the Event Source's watch list — if non-empty, only events
     # whose event_type matches (or matches a `prefix.*` wildcard) propagate.
