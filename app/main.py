@@ -59,7 +59,28 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 
 
 def _get_token() -> str:
-    return os.environ.get("DISPATCHER_INGEST_TOKEN", "")
+    """Resolve the dispatcher's bearer token.
+
+    Resolution order:
+    1. DISPATCHER_INGEST_TOKEN env var (direct value) — wins if set
+    2. DISPATCHER_INGEST_TOKEN_FILE env var (path to a file containing the
+       token) — for installs that drop the token in ~/.mindframe/secrets/
+       and need the file-handoff workflow (see mindframe install.txt PHASE 7.6)
+
+    Read fresh on every call; the file may be rotated by the operator without
+    a daemon restart.
+    """
+    direct = os.environ.get("DISPATCHER_INGEST_TOKEN", "").strip()
+    if direct:
+        return direct
+    file_path = os.environ.get("DISPATCHER_INGEST_TOKEN_FILE", "").strip()
+    if file_path:
+        try:
+            with open(file_path) as f:
+                return f.read().strip()
+        except OSError:
+            pass
+    return ""
 
 
 class EventBody(BaseModel):
@@ -76,7 +97,11 @@ class DirectBody(BaseModel):
 def _check_auth(authorization: str | None):
     expected = _get_token()
     if not expected:
-        raise HTTPException(500, "DISPATCHER_INGEST_TOKEN not configured")
+        raise HTTPException(
+            500,
+            "no bearer configured — set DISPATCHER_INGEST_TOKEN env var, "
+            "or DISPATCHER_INGEST_TOKEN_FILE pointing at a readable file",
+        )
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(401, "Missing Bearer token")
     if not hmac.compare_digest(authorization[7:], expected):

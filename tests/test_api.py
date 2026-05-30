@@ -30,6 +30,71 @@ def test_event_requires_token(client):
     assert r.status_code == 401
 
 
+def test_bearer_from_file(tmp_path, monkeypatch):
+    """DISPATCHER_INGEST_TOKEN_FILE lets the install.txt PHASE 7.6 workflow
+    actually authenticate. Without this, the bearer file written by setup
+    would have to be re-injected as an env var via systemd EnvironmentFile,
+    which install.txt doesn't currently arrange."""
+    monkeypatch.delenv("DISPATCHER_INGEST_TOKEN", raising=False)
+    bearer_file = tmp_path / "bearer.token"
+    bearer_file.write_text("file-bearer-value\n")
+    monkeypatch.setenv("DISPATCHER_INGEST_TOKEN_FILE", str(bearer_file))
+
+    from app.main import _get_token
+    assert _get_token() == "file-bearer-value"
+
+
+def test_bearer_env_wins_over_file(tmp_path, monkeypatch):
+    """Direct env var takes precedence over file — operator overrides."""
+    monkeypatch.setenv("DISPATCHER_INGEST_TOKEN", "direct-wins")
+    bearer_file = tmp_path / "bearer.token"
+    bearer_file.write_text("from-file\n")
+    monkeypatch.setenv("DISPATCHER_INGEST_TOKEN_FILE", str(bearer_file))
+
+    from app.main import _get_token
+    assert _get_token() == "direct-wins"
+
+
+def test_bearer_file_missing_returns_empty(tmp_path, monkeypatch):
+    monkeypatch.delenv("DISPATCHER_INGEST_TOKEN", raising=False)
+    monkeypatch.setenv("DISPATCHER_INGEST_TOKEN_FILE", str(tmp_path / "missing"))
+
+    from app.main import _get_token
+    assert _get_token() == ""
+
+
+def test_event_uses_bearer_file(tmp_path, monkeypatch):
+    """End-to-end: a dispatcher started with only the FILE env var honors
+    requests bearing the file's token."""
+    monkeypatch.delenv("DISPATCHER_INGEST_TOKEN", raising=False)
+    bearer_file = tmp_path / "bearer.token"
+    bearer_file.write_text("e2e-file-bearer\n")
+    monkeypatch.setenv("DISPATCHER_INGEST_TOKEN_FILE", str(bearer_file))
+
+    db_path = str(tmp_path / "test.db")
+    from app import db as db_module
+    monkeypatch.setattr(db_module, "DB_PATH", db_path)
+
+    from app.main import app
+    db_module.init_db()
+    with TestClient(app) as c:
+        r = c.post(
+            "/api/health",
+            headers={"Authorization": "Bearer e2e-file-bearer"},
+        )
+        # /api/health doesn't require auth, but /api/events does — use that.
+        r = c.get(
+            "/api/events",
+            headers={"Authorization": "Bearer e2e-file-bearer"},
+        )
+        assert r.status_code == 200, r.text
+        r = c.get(
+            "/api/events",
+            headers={"Authorization": "Bearer wrong"},
+        )
+        assert r.status_code == 403
+
+
 def test_event_bad_token(client):
     r = client.post(
         "/api/event",
