@@ -136,6 +136,56 @@ def test_event_forwards_to_session_bridge(client, monkeypatch):
     assert "boom" in captured["json"]["text"]
 
 
+def test_event_rejects_payload_field(client):
+    """The API field is `data`, not `payload`. A POST that sends `payload`
+    must 422 rather than silently dropping the value and substituting an
+    empty {payload} downstream (extra='forbid' on EventBody)."""
+    r = client.post(
+        "/api/event",
+        json={"source": "calendar", "event_type": "meeting-prep",
+              "payload": {"meeting_title": "Q3 review"}},
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert r.status_code == 422, r.text
+
+
+def test_event_rejects_arbitrary_unknown_field(client):
+    """Any field outside source/event_type/data is rejected."""
+    r = client.post(
+        "/api/event",
+        json={"source": "sentry", "data": {"msg": "boom"}, "bogus": 1},
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert r.status_code == 422, r.text
+
+
+def test_event_accepts_correct_data_field(client, monkeypatch):
+    """A correct POST using `data` still works."""
+    captured = {}
+
+    class StubClient:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): pass
+        async def post(self, url, json=None):
+            captured["json"] = json
+            class R:
+                status_code = 200
+                def json(self): return {"ok": True}
+            return R()
+
+    monkeypatch.setattr("app.main.httpx.AsyncClient", StubClient)
+
+    r = client.post(
+        "/api/event",
+        json={"source": "calendar", "event_type": "meeting-prep",
+              "data": {"meeting_title": "Q3 review"}},
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is True
+
+
 def test_direct_forwards_to_named_session(client, monkeypatch):
     captured = {}
 

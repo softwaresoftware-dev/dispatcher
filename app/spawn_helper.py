@@ -5,6 +5,23 @@ substitutes {event_id}, {task_id}, {payload} into the starter prompt, and
 invokes spawner_cli with the recipe's plugins, brief, and channels. The
 spawner blocks until tmux + claude are launched (~16s) — callers should
 fire this from a BackgroundTasks context, not in the request hot path.
+
+Placeholder semantics — IMPORTANT, two distinct substitution surfaces:
+
+1. recipe.starter_prompt — supports {event_id}, {task_id}, {payload}, {brief}.
+   {payload} is the ONLY place the event's `data` reaches the spawned agent:
+   it is replaced with the full event `data` rendered as pretty JSON. To act
+   on event fields (e.g. a calendar event's meeting_title), the recipe must
+   read them out of {payload} in its starter_prompt — there is no field-level
+   substitution of event data anywhere.
+
+2. recipe brief.json / frame: block {{placeholders}} — filled from the
+   channels.yaml route's `brief:` overrides. Override values may themselves
+   reference only {event_id} and {task_id}; they CANNOT reference event data
+   fields. A route writing `brief: { meeting_title: "{meeting_title}" }`
+   expecting dispatcher to pull `data.meeting_title` is wrong — the literal
+   string `{meeting_title}` passes through unchanged. Event data is not
+   available to brief overrides; use {payload} in starter_prompt instead.
 """
 
 from __future__ import annotations
@@ -100,8 +117,17 @@ def _compose_brief(
     A required placeholder with no override is an error — the on-call path
     should never spawn an agent that's missing its operating context. An
     optional placeholder with no override resolves to "" (the recipe is
-    responsible for treating an empty value as "unset"). Override values
-    may themselves contain {event_id} / {task_id}, substituted here.
+    responsible for treating an empty value as "unset").
+
+    Override values come from the channels.yaml route's `brief:` block. The
+    ONLY tokens substituted into an override value are {event_id} and
+    {task_id} (see _resolve below). Override values CANNOT reference event
+    `data` fields — there is no `{some_data_field}` substitution here. A
+    route that writes `brief: { meeting_title: "{meeting_title}" }` hoping
+    dispatcher will fill it from `data.meeting_title` is wrong: the literal
+    string `{meeting_title}` passes through untouched. To act on event data,
+    the recipe must read the full event `data` via {payload} in its
+    starter_prompt; brief overrides are for static, route-authored context.
     """
     missing_required: set[str] = set()
 
