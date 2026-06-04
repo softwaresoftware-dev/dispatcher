@@ -5,6 +5,23 @@ substitutes {event_id}, {task_id}, {payload} into the starter prompt, and
 invokes spawner_cli with the recipe's plugins, brief, and channels. The
 spawner blocks until tmux + claude are launched (~16s) — callers should
 fire this from a BackgroundTasks context, not in the request hot path.
+
+Placeholder semantics — IMPORTANT, two distinct substitution surfaces:
+
+1. recipe.starter_prompt — supports {event_id}, {task_id}, {payload}, {brief}.
+   {payload} is the ONLY place the event's `data` reaches the spawned agent:
+   it is replaced with the full event `data` rendered as pretty JSON. To act
+   on event fields (e.g. a calendar event's meeting_title), the recipe must
+   read them out of {payload} in its starter_prompt — there is no field-level
+   substitution of event data anywhere.
+
+2. recipe brief.json / frame: block {{placeholders}} — filled from the
+   channels.yaml route's `brief:` overrides. Override values may themselves
+   reference only {event_id} and {task_id}; they CANNOT reference event data
+   fields. A route writing `brief: { meeting_title: "{meeting_title}" }`
+   expecting dispatcher to pull `data.meeting_title` is wrong — the literal
+   string `{meeting_title}` passes through unchanged. Event data is not
+   available to brief overrides; use {payload} in starter_prompt instead.
 """
 
 from __future__ import annotations
@@ -100,8 +117,17 @@ def _compose_brief(
     A required placeholder with no override is an error — the on-call path
     should never spawn an agent that's missing its operating context. An
     optional placeholder with no override resolves to "" (the recipe is
-    responsible for treating an empty value as "unset"). Override values
-    may themselves contain {event_id} / {task_id}, substituted here.
+    responsible for treating an empty value as "unset").
+
+    Override values come from the channels.yaml route's `brief:` block. The
+    ONLY tokens substituted into an override value are {event_id} and
+    {task_id} (see _resolve below). Override values CANNOT reference event
+    `data` fields — there is no `{some_data_field}` substitution here. A
+    route that writes `brief: { meeting_title: "{meeting_title}" }` hoping
+    dispatcher will fill it from `data.meeting_title` is wrong: the literal
+    string `{meeting_title}` passes through untouched. To act on event data,
+    the recipe must read the full event `data` via {payload} in its
+    starter_prompt; brief overrides are for static, route-authored context.
     """
     missing_required: set[str] = set()
 
@@ -268,19 +294,10 @@ async def spawn_recipe(
 
     task_id_pattern = recipe.get("task_id_pattern") or f"{recipe_id}-{{event_id}}"
     starter_prompt = recipe.get("starter_prompt") or ""
-    # `plugins` and `mcps` may each be a flat list or the schema'd
-    # {base: [...], optional_pool: [...]} form. On the static path there is no
-    # dispatcher to pick from optional_pool, so the spawned agent gets the
-    # deterministic `base` set only.
-    #   plugins -> taskpilot --enabled-plugins (installed-plugin marketplace keys)
-    #   mcps    -> taskpilot --enabled-mcps    (MCP server names from ~/.claude.json)
-    def _base_set(block) -> list[str]:
-        if isinstance(block, dict):
-            return list(block.get("base") or [])
-        return list(block or [])
-
-    enabled_plugins = _base_set(recipe.get("plugins"))
-    enabled_mcps = _base_set(recipe.get("mcps"))
+    # NOTE: taskpilot dropped per-task plugin/MCP curation (the sandbox feature)
+    # in v0.12.0, so the recipe's `plugins`/`mcps` blocks are no longer applied —
+    # a spawned agent inherits whatever the user has enabled globally. The keys
+    # are left tolerated-but-ignored in recipes for backward compatibility.
     channels = recipe.get("channels") or []
     model = recipe.get("model")
     brief_schema = recipe.get("brief_schema") or {}
@@ -369,10 +386,6 @@ async def spawn_recipe(
         # cwd = frame dir lets the agent's mindframe MCP write_block resolve
         # the mindframe id from cwd with no arg, per the spawn convention.
         args += ["--cwd", frame_dir]
-    if enabled_plugins:
-        args += ["--enabled-plugins", ",".join(enabled_plugins)]
-    if enabled_mcps:
-        args += ["--enabled-mcps", ",".join(enabled_mcps)]
     if channels:
         args += ["--channels", ",".join(channels)]
     if model:

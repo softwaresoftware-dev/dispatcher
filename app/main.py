@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 import httpx
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from . import channels, db, pollers, spawn_helper
 
@@ -84,12 +84,18 @@ def _get_token() -> str:
 
 
 class EventBody(BaseModel):
+    # Reject any field that isn't source/event_type/data. A caller that sends
+    # `payload` (a common mistake — the API field is `data`, not `payload`)
+    # gets a 422 instead of silently dropping the value and substituting an
+    # empty {payload} downstream.
+    model_config = ConfigDict(extra="forbid")
     source: str = Field(..., min_length=1, max_length=64)
     event_type: str | None = None
     data: dict | list | str | int | float | bool | None = None
 
 
 class DirectBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     text: str = Field(..., min_length=1)
     source: str = Field(default="direct", max_length=64)
 

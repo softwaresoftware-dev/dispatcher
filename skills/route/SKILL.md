@@ -21,6 +21,44 @@ The dispatcher's static routing table lives at `$INSTALL_DIR/channels.yaml` (whe
 4. **Restart the dispatcher daemon.** Use an available skill or tool from the `daemon` capability provider. Pass it the service name `dispatcher`. If no daemon provider is available, tell the user to restart it manually.
 5. **Confirm the change.** Re-read `channels.yaml` and echo back the final routes table.
 
+## `spawn:` routes — brief overrides vs. event data
+
+A `spawn:<recipe>` route may carry a `brief:` block that fills the recipe's `brief.json` `{{placeholders}}`. There are two distinct substitution surfaces, and they do NOT cross:
+
+- **Route `brief:` overrides** resolve only `{event_id}` and `{task_id}`. They CANNOT reference event `data` fields. A route like `brief: { meeting_title: "{meeting_title}" }` expecting dispatcher to pull `data.meeting_title` is wrong — the literal string `{meeting_title}` passes straight through, and the recipe's `{{meeting_title}}` renders as that literal text. Brief overrides are for static, route-authored context only.
+- **The event `data`** reaches the spawned agent ONLY via `{payload}` in the recipe's `starter_prompt`, where it is substituted as the full event `data` rendered as pretty JSON. To act on event fields, the recipe's `starter_prompt` must parse them out of `{payload}`.
+
+### Worked example — meeting-prep done correctly
+
+Route in `channels.yaml`:
+
+```yaml
+routes:
+  - source: calendar
+    event_type: meeting-prep
+    target: spawn:meeting-prep
+    # brief: overrides are optional and only for static context;
+    # do NOT try to map event data fields here.
+```
+
+Event POSTed to `/api/event`:
+
+```json
+{"source": "calendar", "event_type": "meeting-prep",
+ "data": {"meeting_title": "Q3 review", "attendees": ["a@x.com"]}}
+```
+
+Recipe `recipe.yaml` reads the data via `{payload}`:
+
+```yaml
+starter_prompt: |
+  A meeting needs prep. The full calendar event is below as JSON.
+  Read meeting_title and attendees from it and produce a prep doc.
+
+  Event data:
+  {payload}
+```
+
 ## Notes
 
 - This skill writes to a config file; it does not touch the dispatcher's audit log or state.
