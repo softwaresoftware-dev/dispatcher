@@ -11,7 +11,9 @@ trigger:
 
 policy:
   model: sonnet
-  kind: service                 # long-lived — the stream is continuous
+  kind: task                    # each stream-state push dispatches a fresh
+                                # agent — continuity lives in the stream
+                                # server, not a supervised long-running agent
 
 # The `beats` MCP is configured per host with the stream server's endpoint and
 # DJ key; the agent never sees the key. Capabilities: none — beats-dj is a

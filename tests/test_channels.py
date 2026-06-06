@@ -3,7 +3,7 @@
 When channels.yaml has a matching route, dispatcher-ingress skips the LLM
 dispatcher entirely. Two target shapes:
   - `session:<name>` — POST text to session-bridge /sessions/<name>/message
-  - `spawn:<recipe>` — shell out to taskpilot spawner_cli for an ephemeral agent
+  - `spawn:<recipe>` — POST to taskpilot's daemon to create+spawn an agent
 """
 
 import json

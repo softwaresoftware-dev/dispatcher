@@ -5,7 +5,7 @@ DISPATCHER_CHANNELS_FILE). When a route matches, dispatcher-ingress
 skips the LLM dispatcher and forwards directly. Two target shapes:
 
   - `session:<name>` — POST to session-bridge /sessions/<name>/message
-  - `spawn:<recipe>` — shell out to taskpilot's spawner_cli with the recipe
+  - `spawn:<recipe>` — POST to taskpilot's daemon to create+spawn an agent
 
 Unmapped events fall through to the LLM-routed path (existing behavior).
 This module is intentionally cache-light: routes reload on every call so

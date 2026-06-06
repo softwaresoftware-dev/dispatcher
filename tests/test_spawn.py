@@ -6,6 +6,10 @@ channels.yaml route's `brief:` block fills the recipe template's
 the dispatcher must never spawn an agent missing its operating context.
 """
 
+import asyncio
+import json
+
+from app import spawn_helper
 from app.spawn_helper import _compose_brief
 
 
@@ -72,3 +76,119 @@ def test_non_string_override_preserves_type():
     composed, err = _compose(brief, {"retries": 3})
     assert err is None
     assert composed["context"]["retries"] == 3
+
+
+# --- spawn hand-off: dispatcher → taskpilot daemon over HTTP ------------------
+#
+# The spawn path used to shell out to a taskpilot CLI; it now POSTs to the
+# daemon's /tasks/create_and_spawn. Nothing exercised the actual hand-off
+# before, which is how a deleted CLI slipped through a green suite. These
+# tests stub httpx so the request shape and result mapping are covered.
+
+
+class _FakeResp:
+    def __init__(self, status_code=200, payload=None):
+        self.status_code = status_code
+        self._payload = payload if payload is not None else {}
+        self.text = json.dumps(self._payload)
+
+    def json(self):
+        return self._payload
+
+
+def _fake_client(captured, resp):
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json=None):
+            captured["url"] = url
+            captured["json"] = json
+            return resp
+
+    return _Client
+
+
+def _write_recipe(tmp_path, body):
+    rdir = tmp_path / "meeting-prep"
+    rdir.mkdir()
+    (rdir / "recipe.yaml").write_text(body)
+    return rdir
+
+
+def test_spawn_recipe_posts_to_taskpilot_daemon(tmp_path, monkeypatch):
+    _write_recipe(
+        tmp_path,
+        "task_id_pattern: 'meeting-prep-{event_id}'\n"
+        "model: opus\n"
+        "starter_prompt: 'Handle {event_id}. Payload: {payload}'\n",
+    )
+    captured = {}
+    resp = _FakeResp(200, {"status": "running", "task_id": "meeting-prep-evt-1"})
+    monkeypatch.setattr(spawn_helper.httpx, "AsyncClient", _fake_client(captured, resp))
+
+    result = asyncio.run(
+        spawn_helper.spawn_recipe(
+            recipe_id="meeting-prep",
+            payload={"meeting_title": "Sync"},
+            event_id="evt-1",
+            recipes_dir=tmp_path,
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["task_id"] == "meeting-prep-evt-1"
+    assert captured["url"].endswith("/tasks/create_and_spawn")
+    assert captured["json"]["name"] == "meeting-prep-evt-1"
+    assert captured["json"]["model"] == "opus"
+    # {payload} is the only place event data reaches the agent — rendered JSON.
+    assert "meeting_title" in captured["json"]["description"]
+    assert "evt-1" in captured["json"]["description"]
+
+
+def test_spawn_recipe_surfaces_daemon_error(tmp_path, monkeypatch):
+    _write_recipe(
+        tmp_path,
+        "task_id_pattern: 'meeting-prep-{event_id}'\n"
+        "starter_prompt: 'go'\n",
+    )
+    captured = {}
+    resp = _FakeResp(502, {"detail": "tmux session could not be launched"})
+    monkeypatch.setattr(spawn_helper.httpx, "AsyncClient", _fake_client(captured, resp))
+
+    result = asyncio.run(
+        spawn_helper.spawn_recipe(
+            recipe_id="meeting-prep",
+            payload={},
+            event_id="evt-1",
+            recipes_dir=tmp_path,
+        )
+    )
+
+    assert result["ok"] is False
+    assert "502" in result["error"]
+    assert "tmux session could not be launched" in result["error"]
+
+
+def test_spawn_recipe_missing_recipe_is_an_error(tmp_path, monkeypatch):
+    # No HTTP call should happen — fail before the daemon.
+    def _boom(*a, **k):
+        raise AssertionError("must not POST when the recipe is missing")
+
+    monkeypatch.setattr(spawn_helper.httpx, "AsyncClient", _boom)
+    result = asyncio.run(
+        spawn_helper.spawn_recipe(
+            recipe_id="nonexistent",
+            payload={},
+            event_id="evt-1",
+            recipes_dir=tmp_path,
+        )
+    )
+    assert result["ok"] is False
+    assert "not found" in result["error"]
