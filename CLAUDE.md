@@ -31,9 +31,10 @@ Provides `event-routing`. Consumers (e.g. mindframe) declare
 events. The contract is HTTP, not skill-based — anything speaking the same
 `/api/event` shape can substitute.
 
-Depends on: `daemon` (run the service), `agent-spawning` (taskpilot's
-`spawner_cli.py` is the `spawn:<recipe>` target), `session-mesh` (session-bridge
-is the `session:<name>` target). Optional: `deploy` (public HTTPS ingress).
+Depends on: `daemon` (run the service), `agent-spawning` (taskpilot's daemon
+`POST /tasks/create_and_spawn` on :8912 is the `spawn:<recipe>` target),
+`session-mesh` (session-bridge is the `session:<name>` target). Optional:
+`deploy` (public HTTPS ingress).
 
 ## The service
 

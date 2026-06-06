@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import traceback
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 import httpx
@@ -21,7 +22,23 @@ SESSION_BRIDGE_URL = os.environ.get("SESSION_BRIDGE_URL", "http://127.0.0.1:8910
 DISPATCHER_SESSION = os.environ.get("DISPATCHER_SESSION", "dispatcher")
 DEDUPE_WINDOW_MINUTES = int(os.environ.get("DISPATCHER_DEDUPE_WINDOW_MINUTES", "10"))
 
-app = FastAPI(title="dispatcher-ingress")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    _configure_logging()
+    db.init_db()
+    # Adapter plugins register themselves at import time. Imports are kept
+    # narrowly inside startup so a missing optional adapter never blocks
+    # boot — the runtime no-ops on systems with no registered adapter.
+    try:
+        from . import adapters_bootstrap  # noqa: F401
+    except ImportError:
+        pass
+    await pollers.start_runtime()
+    yield
+    await pollers.stop_runtime()
+
+
+app = FastAPI(title="dispatcher-ingress", lifespan=lifespan)
 
 
 def _log_internal_failure(request: Request, status: str, error: str) -> None:
@@ -215,25 +232,6 @@ def _configure_logging() -> None:
         level=logging.INFO,
         format="%(asctime)s %(name)s [%(levelname)s] %(message)s",
     )
-
-
-@app.on_event("startup")
-async def startup():
-    _configure_logging()
-    db.init_db()
-    # Adapter plugins register themselves at import time. Imports are kept
-    # narrowly inside startup so a missing optional adapter never blocks
-    # boot — the runtime no-ops on systems with no registered adapter.
-    try:
-        from . import adapters_bootstrap  # noqa: F401
-    except ImportError:
-        pass
-    await pollers.start_runtime()
-
-
-@app.on_event("shutdown")
-async def shutdown():
-    await pollers.stop_runtime()
 
 
 @app.get("/api/health")

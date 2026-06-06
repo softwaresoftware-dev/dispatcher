@@ -172,8 +172,15 @@ def validate_binding(binding: Binding, agent: Agent | None = None) -> list[str]:
         errors.append("binding `trigger` is required")
     if not binding.policy.get("model"):
         errors.append("binding `policy.model` is required")
-    if binding.policy.get("kind") not in ("task", "service"):
-        errors.append("binding `policy.kind` must be `task` or `service`")
+    # Every agent is spawned ephemerally — there is no supervised long-running
+    # "service" kind. `kind` defaults to `task`; a stale `kind: service` is
+    # rejected so old bindings surface the change instead of silently implying
+    # supervision that does not exist.
+    if binding.policy.get("kind", "task") != "task":
+        errors.append(
+            "binding `policy.kind` must be `task` — the `service` "
+            "(long-running) kind was removed"
+        )
 
     if agent is not None:
         if binding.agent_name != agent.name:

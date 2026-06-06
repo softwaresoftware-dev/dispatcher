@@ -1,10 +1,11 @@
-"""Shell out to taskpilot's spawner_cli for `spawn:<recipe>` channel routes.
+"""Hand `spawn:<recipe>` channel routes off to taskpilot's runtime daemon.
 
 Given a recipe id, dispatcher-ingress reads `~/.dispatcher/recipes/<id>/recipe.yaml`,
-substitutes {event_id}, {task_id}, {payload} into the starter prompt, and
-invokes spawner_cli with the recipe's plugins, brief, and channels. The
-spawner blocks until tmux + claude are launched (~16s) — callers should
-fire this from a BackgroundTasks context, not in the request hot path.
+substitutes {event_id}, {task_id}, {payload} into the starter prompt, and POSTs
+to taskpilot's daemon `POST /tasks/create_and_spawn` with the composed
+description, brief, channels, and model. The daemon creates the task row and
+launches tmux + claude (~16s) — callers should fire this from a BackgroundTasks
+context, not in the request hot path.
 
 Placeholder semantics — IMPORTANT, two distinct substitution surfaces:
 
@@ -31,9 +32,9 @@ import json
 import os
 import re
 import sys
-import tempfile
 from pathlib import Path
 
+import httpx
 import yaml
 
 # {{placeholder}} tokens in a recipe's brief.json — filled by the LLM
@@ -47,10 +48,9 @@ DEFAULT_RECIPES_DIR = Path(
         str(Path.home() / ".dispatcher" / "recipes"),
     )
 )
-DEFAULT_SPAWNER_CLI = os.environ.get(
-    "TASKPILOT_SPAWNER_CLI",
-    str(Path.home() / "projects" / "softwaresoftware" / "projects" / "plugins" / "providers" / "taskpilot" / "spawner_cli.py"),
-)
+TASKPILOT_DAEMON_URL = os.environ.get(
+    "TASKPILOT_DAEMON_URL", "http://127.0.0.1:8912"
+).rstrip("/")
 
 
 # When a recipe declares a `frame:` block, dispatcher shells out to mindframe's
@@ -268,7 +268,7 @@ async def spawn_recipe(
     event_id: str,
     brief_overrides: dict | None = None,
     recipes_dir: Path | None = None,
-    spawner_cli: str | None = None,
+    taskpilot_daemon_url: str | None = None,
     mindframe_spawn_cli: str | None = None,
 ) -> dict:
     """Spawn an ephemeral taskpilot agent from a recipe.
@@ -294,11 +294,10 @@ async def spawn_recipe(
 
     task_id_pattern = recipe.get("task_id_pattern") or f"{recipe_id}-{{event_id}}"
     starter_prompt = recipe.get("starter_prompt") or ""
-    # NOTE: taskpilot dropped per-task plugin/MCP curation (the sandbox feature)
-    # in v0.12.0, so the recipe's `plugins`/`mcps` blocks are no longer applied —
-    # a spawned agent inherits whatever the user has enabled globally. The keys
-    # are left tolerated-but-ignored in recipes for backward compatibility.
-    channels = recipe.get("channels") or []
+    # taskpilot's runtime gives every spawned agent the user's globally-enabled
+    # plugins/MCPs and the session-bridge channel — there is no per-task
+    # curation. A recipe's legacy `plugins`/`mcps`/`channels` blocks (if any)
+    # are simply not read.
     model = recipe.get("model")
     brief_schema = recipe.get("brief_schema") or {}
     optional_keys = set(brief_schema.get("optional") or [])
@@ -342,9 +341,9 @@ async def spawn_recipe(
         task_id = mindframe_id
 
     # Compose the brief: fill the recipe template's {{placeholders}} from the
-    # route's brief overrides. Write the result to a temp file passed to the
-    # spawner — never hand the raw {{...}} template to a spawned agent.
-    brief_path: str | None = None
+    # route's brief overrides. The composed object is sent in the spawn request
+    # body — never hand the raw {{...}} template to a spawned agent.
+    composed_brief: dict | None = None
     brief_text = "{}"
     if brief_json.exists():
         try:
@@ -360,14 +359,8 @@ async def spawn_recipe(
         )
         if err:
             return {"ok": False, "error": err}
+        composed_brief = composed if isinstance(composed, dict) else None
         brief_text = json.dumps(composed, indent=2)
-        tmp = tempfile.NamedTemporaryFile(
-            mode="w", suffix=".brief.json", prefix=f"{task_id}-",
-            delete=False, encoding="utf-8",
-        )
-        tmp.write(brief_text)
-        tmp.close()
-        brief_path = tmp.name
 
     description = (
         starter_prompt.replace("{event_id}", event_id)
@@ -376,61 +369,38 @@ async def spawn_recipe(
         .replace("{brief}", brief_text)
     )
 
-    args = [
-        sys.executable,
-        spawner_cli or DEFAULT_SPAWNER_CLI,
-        description,
-        "--name", task_id,
-    ]
+    spawn_body: dict = {"description": description, "name": task_id}
     if frame_dir:
         # cwd = frame dir lets the agent's mindframe MCP write_block resolve
         # the mindframe id from cwd with no arg, per the spawn convention.
-        args += ["--cwd", frame_dir]
-    if channels:
-        args += ["--channels", ",".join(channels)]
+        spawn_body["cwd"] = frame_dir
     if model:
-        args += ["--model", model]
-    if brief_path:
-        args += ["--brief", brief_path]
+        spawn_body["model"] = model
+    if composed_brief is not None:
+        spawn_body["brief"] = composed_brief
+
+    url = (taskpilot_daemon_url or TASKPILOT_DAEMON_URL).rstrip("/") + "/tasks/create_and_spawn"
+    try:
+        async with httpx.AsyncClient(timeout=SPAWN_TIMEOUT_SEC) as client:
+            resp = await client.post(url, json=spawn_body)
+    except httpx.HTTPError as e:
+        return {"ok": False, "error": f"taskpilot daemon unreachable at {url}: {e}"}
+
+    if resp.status_code >= 400:
+        detail = resp.text[:300]
+        try:
+            detail = resp.json().get("detail", detail)
+        except ValueError:
+            pass
+        return {"ok": False, "error": f"taskpilot spawn failed ({resp.status_code}): {detail}"}
 
     try:
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *args,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-        except (OSError, FileNotFoundError) as e:
-            return {"ok": False, "error": f"spawner_cli invoke failed: {e}"}
-
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=SPAWN_TIMEOUT_SEC)
-        except asyncio.TimeoutError:
-            # Kill the wedged spawner so the BackgroundTask worker isn't held forever.
-            try:
-                proc.kill()
-                await proc.wait()
-            except ProcessLookupError:
-                pass
-            return {"ok": False, "error": f"spawner_cli timeout after {SPAWN_TIMEOUT_SEC}s"}
-
-        if proc.returncode != 0:
-            return {
-                "ok": False,
-                "error": f"spawner_cli exit {proc.returncode}: {stderr.decode(errors='replace')[:200]}",
-            }
-        try:
-            result = json.loads(stdout.decode())
-        except (json.JSONDecodeError, ValueError):
-            return {"ok": False, "error": f"spawner_cli non-JSON output: {stdout.decode(errors='replace')[:200]}"}
-        if mindframe_id:
-            result["mindframe_id"] = mindframe_id
-            result["mindframe_url"] = mindframe_url
-            result["frame_dir"] = frame_dir
-        return result
-    finally:
-        if brief_path:
-            try:
-                os.unlink(brief_path)
-            except OSError:
-                pass
+        result = resp.json()
+    except ValueError:
+        return {"ok": False, "error": f"taskpilot non-JSON response: {resp.text[:200]}"}
+    result.setdefault("ok", True)
+    if mindframe_id:
+        result["mindframe_id"] = mindframe_id
+        result["mindframe_url"] = mindframe_url
+        result["frame_dir"] = frame_dir
+    return result
