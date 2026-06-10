@@ -16,22 +16,20 @@ Placeholder semantics — IMPORTANT, two distinct substitution surfaces:
    read them out of {payload} in its starter_prompt — there is no field-level
    substitution of event data anywhere.
 
-2. recipe brief.json / frame: block {{placeholders}} — filled from the
-   channels.yaml route's `brief:` overrides. Override values may themselves
-   reference only {event_id} and {task_id}; they CANNOT reference event data
-   fields. A route writing `brief: { meeting_title: "{meeting_title}" }`
-   expecting dispatcher to pull `data.meeting_title` is wrong — the literal
-   string `{meeting_title}` passes through unchanged. Event data is not
-   available to brief overrides; use {payload} in starter_prompt instead.
+2. recipe brief.json {{placeholders}} — filled from the channels.yaml route's
+   `brief:` overrides. Override values may themselves reference only
+   {event_id} and {task_id}; they CANNOT reference event data fields. A route
+   writing `brief: { meeting_title: "{meeting_title}" }` expecting dispatcher
+   to pull `data.meeting_title` is wrong — the literal string
+   `{meeting_title}` passes through unchanged. Event data is not available to
+   brief overrides; use {payload} in starter_prompt instead.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import re
-import sys
 from pathlib import Path
 
 import httpx
@@ -53,48 +51,7 @@ TASKPILOT_DAEMON_URL = os.environ.get(
 ).rstrip("/")
 
 
-# When a recipe declares a `frame:` block, dispatcher shells out to mindframe's
-# spawn CLI to create the mindframe (mkdir + meta.json + seed block) before
-# spawning the agent. Discovery order:
-#   1. $MINDFRAME_SPAWN_CLI env (explicit override — install skill sets this)
-#   2. The marketplace cache at ~/.claude/plugins/cache/<marketplace>/mindframe/<version>/lib/spawn.py
-#      — pick the highest version directory found
-#   3. None — spawn_recipe returns a clear error when this happens for a
-#      `frame:`-declaring recipe
-# No hardcoded dev paths — the resolver-installed plugin tree is the source
-# of truth, per the projects/CLAUDE.md no-hardcoded-paths rule.
-
-def _resolve_mindframe_spawn_cli() -> str | None:
-    """Locate the mindframe spawn CLI. Returns the absolute path or None.
-    Called per-spawn rather than at module import so a fresh install
-    (or an env override) takes effect without a dispatcher restart."""
-    explicit = os.environ.get("MINDFRAME_SPAWN_CLI", "").strip()
-    if explicit:
-        return explicit if Path(explicit).is_file() else None
-
-    cache = Path.home() / ".claude" / "plugins" / "cache"
-    if not cache.is_dir():
-        return None
-
-    candidates: list[tuple[str, Path]] = []
-    for marketplace_dir in cache.iterdir():
-        mf_root = marketplace_dir / "mindframe"
-        if not mf_root.is_dir():
-            continue
-        for version_dir in mf_root.iterdir():
-            cli = version_dir / "lib" / "spawn.py"
-            if cli.is_file():
-                candidates.append((version_dir.name, cli))
-    if not candidates:
-        return None
-    # Highest version wins. Versions are semver-shaped strings ("0.4.0");
-    # lex sort works for the cases we ship.
-    candidates.sort(reverse=True)
-    return str(candidates[0][1])
-
-
 SPAWN_TIMEOUT_SEC = int(os.environ.get("DISPATCHER_SPAWN_TIMEOUT_SEC", "120"))
-FRAME_SPAWN_TIMEOUT_SEC = int(os.environ.get("DISPATCHER_FRAME_SPAWN_TIMEOUT_SEC", "15"))
 
 
 def _slugify(name: str) -> str:
@@ -179,88 +136,6 @@ def _compose_brief(
     return composed, None
 
 
-async def _create_mindframe(
-    *,
-    frame_block: dict,
-    brief_overrides: dict,
-    event_id: str,
-    task_id: str,
-    optional_keys: set[str],
-    mindframe_spawn_cli: str,
-) -> dict:
-    """Shell out to mindframe's spawn CLI to mint a frame before taskpilot.
-
-    `frame_block` is the recipe.yaml's `frame:` value. Its `title` and
-    `seed_block` fields go through the same {{placeholder}} composer used
-    for brief.json, so dispatcher passes through the route's `brief:` values.
-
-    Returns {ok, mindframe_id, frame_dir, url} or {ok: False, error}.
-    """
-    composed, err = _compose_brief(
-        frame_block,
-        brief_overrides,
-        event_id=event_id,
-        task_id=task_id,
-        optional_keys=optional_keys,
-    )
-    if err:
-        return {"ok": False, "error": f"frame: block incomplete — {err}"}
-
-    title = (composed or {}).get("title") or task_id
-    seed_block = (composed or {}).get("seed_block")
-    tags = (composed or {}).get("tags") or []
-    spawned_by = {
-        "kind": "dispatcher-event",
-        "event_id": event_id,
-        "recipe": task_id,
-    }
-    args = [
-        sys.executable, mindframe_spawn_cli,
-        "--title", str(title),
-        "--spawned-by-json", json.dumps(spawned_by),
-    ]
-    if seed_block is not None:
-        args += ["--seed-block-json", json.dumps(seed_block)]
-    if tags:
-        args += ["--tags", ",".join(str(t) for t in tags)]
-
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-    except (OSError, FileNotFoundError) as e:
-        return {"ok": False, "error": f"mindframe-spawn invoke failed: {e}"}
-    try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=FRAME_SPAWN_TIMEOUT_SEC)
-    except asyncio.TimeoutError:
-        try:
-            proc.kill()
-            await proc.wait()
-        except ProcessLookupError:
-            pass
-        return {"ok": False, "error": f"mindframe-spawn timeout after {FRAME_SPAWN_TIMEOUT_SEC}s"}
-    # The CLI emits its JSON envelope on stdout for both success and failure
-    # paths. Parse stdout first so structured errors come through; fall back
-    # to stderr only if stdout doesn't carry a parseable result.
-    try:
-        result = json.loads(stdout.decode())
-    except json.JSONDecodeError:
-        suffix = stderr.decode(errors="replace")[:200] or stdout.decode(errors="replace")[:200]
-        return {"ok": False, "error": f"mindframe-spawn exit {proc.returncode}: {suffix}"}
-    if not result.get("ok"):
-        return {"ok": False, "error": result.get("error", "mindframe-spawn reported failure")}
-    if proc.returncode != 0:
-        return {"ok": False, "error": f"mindframe-spawn exit {proc.returncode} despite ok=true"}
-    return {
-        "ok": True,
-        "mindframe_id": result["id"],
-        "frame_dir": result["frame_dir"],
-        "url": result["url"],
-    }
-
-
 async def spawn_recipe(
     *,
     recipe_id: str,
@@ -269,7 +144,6 @@ async def spawn_recipe(
     brief_overrides: dict | None = None,
     recipes_dir: Path | None = None,
     taskpilot_daemon_url: str | None = None,
-    mindframe_spawn_cli: str | None = None,
 ) -> dict:
     """Spawn an ephemeral taskpilot agent from a recipe.
 
@@ -301,44 +175,14 @@ async def spawn_recipe(
     model = recipe.get("model")
     brief_schema = recipe.get("brief_schema") or {}
     optional_keys = set(brief_schema.get("optional") or [])
-    frame_block = recipe.get("frame")  # optional; presence opts the recipe into mindframe mode
+    # A recipe's legacy `frame:` block (the deleted mindframe spawn-CLI
+    # convention) is not read; surface frames are minted by the mindframe
+    # dashboard, not by dispatcher.
 
     # Substitute {event_id} → predict task_id.
     raw_id = task_id_pattern.format(event_id=event_id)
     task_id = _slugify(raw_id)
     pretty_payload = json.dumps(payload, indent=2, default=str)
-
-    # If the recipe is a mindframe recipe, mint the frame first so the
-    # subsequent task name == frame id and cwd == frame dir. This is the
-    # synchronous-seed-block convention: the operator opening the URL during
-    # the ~16s taskpilot startup window sees the seed block, not a blank page.
-    mindframe_id: str | None = None
-    frame_dir: str | None = None
-    mindframe_url: str | None = None
-    if isinstance(frame_block, dict):
-        resolved_mf_cli = mindframe_spawn_cli or _resolve_mindframe_spawn_cli()
-        if not resolved_mf_cli:
-            return {"ok": False, "error": (
-                "Recipe declares `frame:` but the mindframe spawn CLI was not "
-                "found. Install mindframe (`/softwaresoftware:install mindframe`), "
-                "or set $MINDFRAME_SPAWN_CLI to an absolute path."
-            )}
-        frame_res = await _create_mindframe(
-            frame_block=frame_block,
-            brief_overrides=brief_overrides or {},
-            event_id=event_id,
-            task_id=task_id,
-            optional_keys=optional_keys,
-            mindframe_spawn_cli=resolved_mf_cli,
-        )
-        if not frame_res["ok"]:
-            return {"ok": False, "error": frame_res["error"]}
-        mindframe_id = frame_res["mindframe_id"]
-        frame_dir = frame_res["frame_dir"]
-        mindframe_url = frame_res["url"]
-        # Convention: task_id == mindframe_id so session-bridge routing for
-        # button-click "continue" events finds the right session.
-        task_id = mindframe_id
 
     # Compose the brief: fill the recipe template's {{placeholders}} from the
     # route's brief overrides. The composed object is sent in the spawn request
@@ -370,10 +214,6 @@ async def spawn_recipe(
     )
 
     spawn_body: dict = {"description": description, "name": task_id}
-    if frame_dir:
-        # cwd = frame dir lets the agent's mindframe MCP write_block resolve
-        # the mindframe id from cwd with no arg, per the spawn convention.
-        spawn_body["cwd"] = frame_dir
     if model:
         spawn_body["model"] = model
     if composed_brief is not None:
@@ -399,8 +239,4 @@ async def spawn_recipe(
     except ValueError:
         return {"ok": False, "error": f"taskpilot non-JSON response: {resp.text[:200]}"}
     result.setdefault("ok", True)
-    if mindframe_id:
-        result["mindframe_id"] = mindframe_id
-        result["mindframe_url"] = mindframe_url
-        result["frame_dir"] = frame_dir
     return result
