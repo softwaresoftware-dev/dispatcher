@@ -28,35 +28,7 @@ jobs:
       - name: tests
         run: python -m pytest tests/ -v
 
-  wire-with-mindframe:
-    # Cross-repo integration: run dispatcher's frame-spawn tests, which
-    # actually invoke the mindframe spawn CLI from a sibling checkout.
-    name: wire+mindframe (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-        # Windows skipped — frame_spawn tests don't have OS-specific bugs but
-        # the subprocess timing of subprocess.create_subprocess_exec on a
-        # Windows runner has historically been flakier. Re-enable when worth it.
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          path: dispatcher
-      - uses: actions/checkout@v4
-        with:
-          repository: softwaresoftware-dev/mindframe
-          path: mindframe
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: install deps
-        working-directory: dispatcher
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pytest httpx pyyaml mcp
-      - name: cross-repo frame-spawn integration tests
-        working-directory: dispatcher
-        run: python -m pytest tests/test_frame_spawn.py -v
+  # The former wire-with-mindframe job ran cross-repo frame-spawn tests
+  # against mindframe's spawn CLI. Both sides of that contract were removed
+  # (mindframe deleted lib/spawn.py; dispatcher dropped the frame: recipe
+  # path), so the job is gone with them.
