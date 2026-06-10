@@ -1,10 +1,16 @@
-"""GitHub adapter — polls the org Events API and normalizes to ingress events.
+"""GitHub adapter — polls the Events API and normalizes to ingress events.
 
-Acquisition is `GET /orgs/<org>/events?per_page=100` over httpx with ETag
-conditional requests: the previous response's ETag goes out as If-None-Match,
-and a 304 (the common idle tick) carries no body and costs no rate limit.
-This is the primary free-tick mechanism, not an optimization — a 60s-interval
-daemon would otherwise burn quota all day saying "anything new? no."
+Acquisition is `GET /users/<login>/events/orgs/<org>?per_page=100` — the
+authenticated-user org feed, which (unlike the public `/orgs/<org>/events`)
+includes PRIVATE repo events; org repos are private by default, so the public
+feed silently misses most real activity (found live, 2026-06-10). `<login>`
+is the token's own user, resolved once per process via `GET /user`.
+
+Requests go over httpx with ETag conditional requests: the previous response's
+ETag goes out as If-None-Match, and a 304 (the common idle tick) carries no
+body and costs no rate limit. This is the primary free-tick mechanism, not an
+optimization — a 60s-interval daemon would otherwise burn quota all day saying
+"anything new? no."
 
 Event-type coverage: every type in _TYPE_MAP, emitted as `<prefix>.<action>`
 when the GitHub payload carries an action (`pull_request.opened`) and bare
@@ -21,11 +27,15 @@ Auth — identity inheritance, no stored credentials. Resolution order:
 The `credentials_ref: github` field in an Event Source declaration means
 "use the operator's gh identity"; there is no dispatcher-side token store.
 
-Cursor semantics: ids on the Events API are numeric and monotonic — filtering
-is `int(id) > int(last_id)`. `last_seen` (created_at) is carried for the
-watermark display and cold-start reporting; the id is what's authoritative.
-On a cold start (no last_id) ALL current events are returned ascending and the
-poller's go-forward guard decides what to do with them.
+Cursor semantics: filtering is by `created_at` (ISO-Z strings — lexicographic
+compare IS chronological). Event ids are NOT one monotonic sequence — each
+event type draws from its own range (a PullRequestEvent and a PushEvent one
+second apart differ by billions; found live, 2026-06-10), so an id watermark
+silently drops whole types. `last_event_id` only breaks the tie for the exact
+watermark item; same-second boundary repeats across ticks are absorbed by the
+ingress dedupe (each event's `data.id` is the dedupe key). On a cold start
+(no cursor) ALL current events are returned ascending and the poller's
+go-forward guard decides what to do with them.
 """
 
 from __future__ import annotations
@@ -104,16 +114,6 @@ def _to_event_type(gh_event: dict[str, Any]) -> str | None:
     return f"{prefix}.{action}" if action else prefix
 
 
-def _int_id(s: str | None) -> int:
-    """Numeric-string id -> int for monotonic compare. Unparseable -> 0."""
-    if not s:
-        return 0
-    try:
-        return int(s)
-    except (TypeError, ValueError):
-        return 0
-
-
 async def _http_fetch(url: str, headers: dict[str, str]):
     """One real HTTP call. Returns (status, headers, body-or-None)."""
     async with httpx.AsyncClient(timeout=EVENTS_API_TIMEOUT_S) as client:
@@ -125,6 +125,31 @@ async def _http_fetch(url: str, headers: dict[str, str]):
         except ValueError:
             body = None
     return r.status_code, dict(r.headers), body
+
+
+# login per token (sha-keyed) — one GET /user per process, not per tick.
+_login_cache: dict[str, str] = {}
+
+
+async def _resolve_login(token: str, fetch) -> str:
+    import hashlib
+    key = hashlib.sha256(token.encode()).hexdigest()[:16]
+    if key in _login_cache:
+        return _login_cache[key]
+    status, _, body = await fetch(
+        "https://api.github.com/user",
+        {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "dispatcher-event-source-github/2",
+        },
+    )
+    login = (body or {}).get("login") if isinstance(body, dict) else None
+    if status != 200 or not login:
+        raise RuntimeError(f"could not resolve the token's user (GET /user -> {status})")
+    _login_cache[key] = login
+    return login
 
 
 async def poll(source, last_seen, last_event_id, state, *, fetch=None):
@@ -146,7 +171,6 @@ async def poll(source, last_seen, last_event_id, state, *, fetch=None):
         raise RuntimeError(f"source {source.name}: scope.orgs is empty — nothing to poll")
     # One org per source today; multi-org would fan out here.
     org = orgs[0]
-    url = f"https://api.github.com/orgs/{org}/events?per_page=100"
 
     token = _resolve_token()
     if not token:
@@ -154,6 +178,11 @@ async def poll(source, last_seen, last_event_id, state, *, fetch=None):
             "no GitHub token available — set GITHUB_TOKEN, or run `gh auth login` "
             "(the adapter reuses the operator's gh identity; nothing is stored)"
         )
+
+    # The authenticated-user org feed — sees private repo events the public
+    # /orgs/<org>/events endpoint omits.
+    login = await _resolve_login(token, fetch)
+    url = f"https://api.github.com/users/{login}/events/orgs/{org}?per_page=100"
 
     headers = {
         "Authorization": f"Bearer {token}",
@@ -174,17 +203,25 @@ async def poll(source, last_seen, last_event_id, state, *, fetch=None):
 
     new_etag = resp_headers.get("ETag") or resp_headers.get("etag")
 
-    newest_raw = max(body, key=lambda e: _int_id(e.get("id")), default=None)
+    # Newest by created_at — ids are per-type sequences, NOT comparable.
+    newest_raw = max(body, key=lambda e: e.get("created_at") or "", default=None)
     newest = ({"id": str(newest_raw.get("id")), "created_at": newest_raw.get("created_at")}
               if newest_raw else None)
 
-    prev_int = _int_id(last_event_id)
     watching = set(source.watching or [])
 
     events: list[dict] = []
     for raw in body:
-        if last_event_id is not None and _int_id(raw.get("id")) <= prev_int:
-            continue
+        created = raw.get("created_at") or ""
+        rid = str(raw.get("id"))
+        if last_event_id is not None and last_seen:
+            # Chronological watermark; ISO-Z strings compare lexicographically.
+            if created < last_seen:
+                continue
+            if created == last_seen and rid == last_event_id:
+                continue  # the exact watermark item
+            # created == last_seen with a different id passes through — the
+            # ingress dedupe (keyed on data.id) absorbs cross-tick repeats.
         et = _to_event_type(raw)
         if not et:
             continue  # event type we don't model
@@ -192,14 +229,17 @@ async def poll(source, last_seen, last_event_id, state, *, fetch=None):
             continue  # declared but not subscribed
         events.append({
             "event_type": et,
-            "id": str(raw.get("id")),
+            "id": rid,
             "created_at": raw.get("created_at"),
             "data": {
+                "id": rid,  # the ingress dedupe key
                 "repo": (raw.get("repo") or {}).get("name"),
                 "actor": (raw.get("actor") or {}).get("login"),
                 "payload": raw.get("payload") or {},
             },
         })
 
-    events.sort(key=lambda e: _int_id(e["id"]))  # ascending — cursor advances monotonically
+    # Ascending by time (id as a stable same-second tiebreak) so the cursor
+    # advances monotonically.
+    events.sort(key=lambda e: (e["created_at"] or "", e["id"]))
     return events, {"state": new_etag, "newest": newest}

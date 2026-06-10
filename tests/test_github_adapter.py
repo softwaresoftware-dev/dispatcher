@@ -1,8 +1,8 @@
 """Tests for the GitHub Event Source adapter — Events API + ETag + filtering.
 
-The adapter speaks the org Events API over httpx; tests inject a fake `fetch`
-so no network or token is touched. Token resolution is tested separately with
-env/subprocess/hosts.yml monkeypatching.
+The adapter speaks the authenticated-user org events feed over httpx; tests
+inject a fake `fetch` so no network or token is touched. Token resolution is
+tested separately with env/subprocess/hosts.yml monkeypatching.
 """
 
 import asyncio
@@ -40,9 +40,13 @@ def _gh_event(eid, gh_type="PullRequestEvent", action="opened",
 
 
 def _fetch_returning(status, body=None, etag='W/"abc"'):
+    """Fake fetch answering GET /user with a login and the events URL with the
+    canned (status, body)."""
     captured = {}
 
     async def fetch(url, headers):
+        if url.endswith("/user"):
+            return 200, {}, {"login": "thatchert"}
         captured["url"] = url
         captured["headers"] = headers
         return status, {"ETag": etag} if etag else {}, body
@@ -52,6 +56,7 @@ def _fetch_returning(status, body=None, etag='W/"abc"'):
 
 
 def _poll(source, last_seen, last_id, state, fetch):
+    github._login_cache.clear()
     return asyncio.run(github.poll(source, last_seen, last_id, state, fetch=fetch))
 
 
@@ -68,6 +73,7 @@ def test_normalizes_event_shape_and_meta():
     assert ev["event_type"] == "pull_request.opened"
     assert ev["id"] == "1001"
     assert ev["created_at"] == "2026-06-09T10:00:00Z"
+    assert ev["data"]["id"] == "1001"  # the ingress dedupe key
     assert ev["data"]["repo"] == "softwaresoftware-dev/repo"
     assert ev["data"]["actor"] == "ThatcherT"
     assert ev["data"]["payload"]["pull_request"]["number"] == 7
@@ -76,7 +82,9 @@ def test_normalizes_event_shape_and_meta():
     # auth + conditional-request headers
     assert fetch.captured["headers"]["Authorization"] == "Bearer test-token"
     assert "If-None-Match" not in fetch.captured["headers"]
-    assert fetch.captured["url"] == "https://api.github.com/orgs/softwaresoftware-dev/events?per_page=100"
+    # the PRIVATE-aware authenticated-user org feed, not /orgs/<org>/events
+    assert fetch.captured["url"] == \
+        "https://api.github.com/users/thatchert/events/orgs/softwaresoftware-dev?per_page=100"
 
 
 def test_304_is_free_noop_keeping_state():
@@ -87,53 +95,73 @@ def test_304_is_free_noop_keeping_state():
     assert fetch.captured["headers"]["If-None-Match"] == 'W/"prev"'
 
 
-def test_cursor_filters_by_int_id():
-    body = [_gh_event(99), _gh_event(100), _gh_event(101)]
+def test_cursor_filters_by_created_at_not_id():
+    """Ids are per-type sequences (a PushEvent id can be billions above a
+    later PullRequestEvent id) — filtering must be chronological."""
+    body = [
+        _gh_event(13108637081, gh_type="PushEvent", action=None,
+                  created="2026-06-10T13:00:00Z"),           # watermark item
+        _gh_event(10513637251, created="2026-06-10T13:18:54Z"),  # LOWER id, LATER time
+    ]
     fetch = _fetch_returning(200, body)
-    events, meta = _poll(_source(), "t", "100", None, fetch)
-    assert [e["id"] for e in events] == ["101"]
-    # newest reflects the raw feed, not the filtered events
-    assert meta["newest"]["id"] == "101"
+    events, meta = _poll(_source(), "2026-06-10T13:00:00Z", "13108637081", None, fetch)
+    assert [e["id"] for e in events] == ["10513637251"]
+    assert meta["newest"]["id"] == "10513637251"  # newest by created_at
 
 
-def test_int_id_compare_survives_digit_growth():
-    # String compare would say "9" > "10"; int compare must not.
-    body = [_gh_event(10)]
+def test_watermark_item_skipped_same_second_sibling_passes():
+    body = [
+        _gh_event(1, created="2026-06-09T10:00:00Z"),  # exact watermark item
+        _gh_event(2, created="2026-06-09T10:00:00Z"),  # same second, different id
+        _gh_event(3, created="2026-06-09T09:00:00Z"),  # before watermark
+    ]
     fetch = _fetch_returning(200, body)
-    events, _ = _poll(_source(), "t", "9", None, fetch)
-    assert [e["id"] for e in events] == ["10"]
+    events, _ = _poll(_source(), "2026-06-09T10:00:00Z", "1", None, fetch)
+    # sibling passes through (ingress dedupe absorbs cross-tick repeats);
+    # older item and the watermark itself are dropped.
+    assert [e["id"] for e in events] == ["2"]
 
 
 def test_watching_filter_drops_unwatched_but_newest_tracks_them():
-    body = [_gh_event(1, gh_type="PushEvent", action=None),
-            _gh_event(2),
-            _gh_event(3, gh_type="WatchEvent", action="started")]
+    body = [_gh_event(1, gh_type="PushEvent", action=None, created="2026-06-09T10:00:01Z"),
+            _gh_event(2, created="2026-06-09T10:00:02Z"),
+            _gh_event(3, gh_type="WatchEvent", action="started", created="2026-06-09T10:00:03Z")]
     fetch = _fetch_returning(200, body)
-    events, meta = _poll(_source(), "t", "0", None, fetch)
+    events, meta = _poll(_source(), "2026-06-09T09:00:00Z", "0", None, fetch)
     assert [e["event_type"] for e in events] == ["pull_request.opened"]
     assert meta["newest"]["id"] == "3"  # unwatched raw items still advance the watermark
 
 
 def test_empty_watching_means_all_mapped_types():
-    body = [_gh_event(1, gh_type="PushEvent", action=None), _gh_event(2)]
+    body = [_gh_event(1, gh_type="PushEvent", action=None, created="2026-06-09T10:00:01Z"),
+            _gh_event(2, created="2026-06-09T10:00:02Z")]
     fetch = _fetch_returning(200, body)
-    events, _ = _poll(_source(watching=[]), "t", "0", None, fetch)
+    events, _ = _poll(_source(watching=[]), "2026-06-09T09:00:00Z", "0", None, fetch)
     assert [e["event_type"] for e in events] == ["push", "pull_request.opened"]
 
 
 def test_unmapped_type_skipped():
     body = [_gh_event(1, gh_type="SponsorshipEvent", action="created")]
     fetch = _fetch_returning(200, body)
-    events, meta = _poll(_source(watching=[]), "t", "0", None, fetch)
+    events, meta = _poll(_source(watching=[]), "2026-06-09T09:00:00Z", "0", None, fetch)
     assert events == []
     assert meta["newest"]["id"] == "1"
 
 
-def test_events_ascending_by_id():
-    body = [_gh_event(300), _gh_event(100), _gh_event(200)]
+def test_events_ascending_by_created_at():
+    body = [_gh_event(300, created="2026-06-09T11:00:00Z"),
+            _gh_event(100, created="2026-06-09T09:00:00Z"),
+            _gh_event(200, created="2026-06-09T10:00:00Z")]
     fetch = _fetch_returning(200, body)
     events, _ = _poll(_source(), None, None, None, fetch)
     assert [e["id"] for e in events] == ["100", "200", "300"]
+
+
+def test_cold_start_returns_all_watched():
+    body = [_gh_event(1), _gh_event(2)]
+    fetch = _fetch_returning(200, body)
+    events, _ = _poll(_source(), None, None, None, fetch)
+    assert len(events) == 2  # the poller's guard decides what to do with them
 
 
 def test_empty_feed_returns_no_newest():
@@ -153,6 +181,21 @@ def test_empty_scope_raises():
     fetch = _fetch_returning(200, [])
     with pytest.raises(RuntimeError, match="scope.orgs is empty"):
         _poll(_source(scope={}), None, None, None, fetch)
+
+
+def test_login_resolved_once_per_token():
+    calls = {"user": 0}
+
+    async def fetch(url, headers):
+        if url.endswith("/user"):
+            calls["user"] += 1
+            return 200, {}, {"login": "thatchert"}
+        return 200, {"ETag": 'W/"x"'}, []
+
+    github._login_cache.clear()
+    asyncio.run(github.poll(_source(), None, None, None, fetch=fetch))
+    asyncio.run(github.poll(_source(), None, None, None, fetch=fetch))
+    assert calls["user"] == 1
 
 
 # --------------------------- token resolution ---------------------------
