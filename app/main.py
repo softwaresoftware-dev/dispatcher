@@ -1,4 +1,12 @@
-"""dispatcher-ingress — public webhook receiver, forwards to dispatcher agent via session-bridge."""
+"""dispatcher-ingress — webhook receiver, forwards to dispatcher agent via session-bridge.
+
+DEPRECATED ingestion surface. The /api/event webhook is retained for backward
+compatibility — consumers (e.g. mindframe) still speak its HTTP contract — but
+poll-first ingestion (app/poller.py reading event-sources/*.yaml) is now the
+primary path. On a NAT'd host there is no public endpoint for a webhook to reach
+anyway. The shared routing core lives in app/core.py; this module still owns the
+dedupe/audit/forward primitives both paths reuse, plus /api/direct, /api/events,
+and /api/health (none of which are deprecated)."""
 
 import hashlib
 import hmac
@@ -10,11 +18,11 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 import httpx
-from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from . import channels, db, pollers, spawn_helper
+from . import channels, db, spawn_helper
 
 log = logging.getLogger("dispatcher-ingress")
 
@@ -26,16 +34,7 @@ DEDUPE_WINDOW_MINUTES = int(os.environ.get("DISPATCHER_DEDUPE_WINDOW_MINUTES", "
 async def lifespan(app: FastAPI):
     _configure_logging()
     db.init_db()
-    # Adapter plugins register themselves at import time. Imports are kept
-    # narrowly inside startup so a missing optional adapter never blocks
-    # boot — the runtime no-ops on systems with no registered adapter.
-    try:
-        from . import adapters_bootstrap  # noqa: F401
-    except ImportError:
-        pass
-    await pollers.start_runtime()
     yield
-    await pollers.stop_runtime()
 
 
 app = FastAPI(title="dispatcher-ingress", lifespan=lifespan)
@@ -255,9 +254,12 @@ def _event_text(source: str, event_type: str | None, data, received_at: str) -> 
 async def dispatch_event(
     body: EventBody,
     background: BackgroundTasks,
+    response: Response,
     authorization: str | None = Header(None),
 ):
-    """Ingest. First consults channels.yaml for a static (source, event_type) →
+    """DEPRECATED ingress. Prefer poll-first event-sources (app/poller.py).
+
+    First consults channels.yaml for a static (source, event_type) →
     target route; if matched, forwards or spawns deterministically (no LLM).
     If unmapped, falls through to the dispatcher Claude session (LLM-routed).
 
@@ -265,6 +267,15 @@ async def dispatch_event(
     event (same source + event_id) that already forwarded recently is short-
     circuited and returns the original routing decision."""
     _check_auth(authorization)
+
+    # Signal deprecation (RFC 8594) without changing the response body —
+    # poll-first ingestion (app/poller.py) is the supported path now.
+    response.headers["Deprecation"] = "true"
+    log.warning(
+        "DEPRECATED /api/event webhook hit (source=%s, type=%s); "
+        "poll-first event-sources are the primary path",
+        body.source, body.event_type,
+    )
 
     payload_dict = body.model_dump()
     received_at = datetime.now(timezone.utc).isoformat()
@@ -402,7 +413,7 @@ def list_events(
       source — exact match (e.g. 'sentry', '_internal')
       since  — ISO8601 timestamp; only events created at or after this time
 
-    Combined as AND. Useful for taskboard panels: '?status=failed&since=...'
+    Combined as AND. Useful for dashboard panels: '?status=failed&since=...'
     surfaces just the failures since the dashboard last refreshed.
     """
     _check_auth(authorization)

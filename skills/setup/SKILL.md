@@ -1,14 +1,16 @@
 ---
 name: setup
-description: Install and start the dispatcher event-routing daemon on this machine — sets up a Python venv, writes a default channels.yaml, registers with the daemon capability provider, and verifies the health endpoint. Use when setting up event-routing for a new mindframe deployment, or whenever dispatcher needs to be (re)installed on this machine.
+description: Install and start the dispatcher event-routing daemons on this machine — sets up a Python venv, writes a default channels.yaml, registers the poller and the ingress with the daemon capability provider, and verifies health. Use when setting up event-routing for a new mindframe deployment, or whenever dispatcher needs to be (re)installed on this machine.
 ---
 
 # Dispatcher — Setup
 
-You are installing the dispatcher event-routing daemon on this machine. The
-dispatcher-ingress service is **bundled in this plugin** (`${CLAUDE_PLUGIN_ROOT}/app/`)
-— there is nothing to clone. Setup creates a runtime directory, a venv, and
-registers the service as a managed daemon.
+You are installing the dispatcher event-routing daemons on this machine. The
+code is **bundled in this plugin** (`${CLAUDE_PLUGIN_ROOT}/app/`) — there is
+nothing to clone. Setup creates a runtime directory and a venv, then registers
+two managed daemons: the **poller** (poll-first ingestion, the primary path)
+and the **ingress** service (`/api/direct`, `/api/events`, `/api/health`, plus
+the deprecated `/api/event` webhook).
 
 The customer has provided a bearer token in `CLAUDE_PLUGIN_OPTION_BEARER_TOKEN`.
 Other config:
@@ -63,7 +65,23 @@ then run `/reload-plugins`.
    within 10s, tail the daemon's stderr/stdout via the daemon provider's status
    tool and report what failed.
 
-6. **Public URL (optional).** If a `deploy` capability provider is loaded, ask
+6. **Register the poller as a second managed daemon.** Poll-first ingestion is
+   the primary path — without it, Event Source declarations never feed events
+   in. Command:
+   ```
+   $INSTALL_DIR/venv/bin/python -m app.poller
+   ```
+   Working directory: `${CLAUDE_PLUGIN_ROOT}`. Environment:
+   - `DISPATCHER_CHANNELS_FILE=$INSTALL_DIR/channels.yaml`
+   - `DISPATCHER_RECIPES_DIR=$INSTALL_DIR/recipes`
+   - `DISPATCHER_EVENT_SOURCES_DIR=$INSTALL_DIR/event-sources`
+   - optionally `DISPATCHER_POLL_INTERVAL_S` (default 60)
+   Service name: `dispatcher-poller`. Also `mkdir -p $INSTALL_DIR/event-sources`
+   so the operator (or a mindframe agent) has somewhere to drop declarations.
+   Verify by tailing the daemon's log for a `poller started` line; a tick
+   against zero sources is a clean no-op.
+
+7. **Public URL (optional).** If a `deploy` capability provider is loaded, ask
    the user whether to expose the dispatcher publicly. If yes, use that
    provider's deploy skill to put `127.0.0.1:$PORT` behind an HTTPS hostname.
    Save the resulting URL where the user can find it. If no `deploy` provider
