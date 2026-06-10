@@ -3,7 +3,7 @@
 Given a recipe id, dispatcher-ingress reads `~/.dispatcher/recipes/<id>/recipe.yaml`,
 substitutes {event_id}, {task_id}, {payload} into the starter prompt, and POSTs
 to taskpilot's daemon `POST /tasks/create_and_spawn` with the composed
-description, brief, channels, and model. The daemon creates the task row and
+description, brief, and model. The daemon creates the task row and
 launches tmux + claude (~16s) — callers should fire this from a BackgroundTasks
 context, not in the request hot path.
 
