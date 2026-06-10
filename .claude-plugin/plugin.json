@@ -1,7 +1,7 @@
 {
   "name": "dispatcher",
   "description": "Event-routing provider. Bundles and runs the dispatcher-ingress webhook service as a managed daemon, routing events to sessions or spawning ephemeral agents. Hands off to taskpilot for spawn:recipe targets and to session-bridge for session targets.",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "author": {
     "name": "NOV LLC",
     "url": "https://github.com/softwaresoftware-dev"
