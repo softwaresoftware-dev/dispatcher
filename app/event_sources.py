@@ -42,9 +42,10 @@ class EventSource:
     credentials_ref: str | None = None
     transport: str = "auto"
     raw: dict = field(default_factory=dict)
+    workspace: str | None = None  # which workspace partition this source belongs to
 
 
-def load_sources(directory=None) -> list[EventSource]:
+def load_sources(directory=None, workspace: str | None = None) -> list[EventSource]:
     """Read every *.yaml in the event-sources dir. Skips malformed / incomplete
     declarations (missing name or system) rather than failing the whole poll."""
     d = Path(directory or DEFAULT_DIR)
@@ -71,6 +72,29 @@ def load_sources(directory=None) -> list[EventSource]:
                 credentials_ref=data.get("credentials_ref"),
                 transport=data.get("transport", "auto"),
                 raw=data,
+                workspace=workspace,
             )
         )
+    return out
+
+
+def load_all_sources() -> list[EventSource]:
+    """Multi-tenant: aggregate event-sources across every workspace partition,
+    tagging each with the workspace it came from (its connection's owner). The
+    workspace then rides with each event through routing into the spawn's HOME.
+
+    Falls back to the single DISPATCHER_EVENT_SOURCES_DIR (workspace=None) when
+    DISPATCHER_WORKSPACES_ROOT is unset."""
+    root = os.environ.get("DISPATCHER_WORKSPACES_ROOT")
+    if not root:
+        return load_sources()
+    base = Path(root)
+    if not base.is_dir():
+        return []
+    out: list[EventSource] = []
+    for ws in sorted(base.iterdir()):
+        if not ws.is_dir() or ws.name.startswith("."):
+            continue
+        d = ws / ".mindframe" / "dispatcher" / "event-sources"
+        out.extend(load_sources(d, workspace=ws.name))
     return out

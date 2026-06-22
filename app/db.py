@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS events (
     status TEXT NOT NULL,
     error TEXT,
     dedupe_key TEXT,
+    workspace TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -55,6 +56,8 @@ def init_db(path=None):
         cols = {row[1] for row in conn.execute("PRAGMA table_info(events)")}
         if "dedupe_key" not in cols:
             conn.execute("ALTER TABLE events ADD COLUMN dedupe_key TEXT")
+        if "workspace" not in cols:
+            conn.execute("ALTER TABLE events ADD COLUMN workspace TEXT")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_events_dedupe ON events(dedupe_key, created_at)"
         )

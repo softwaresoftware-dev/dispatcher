@@ -196,14 +196,14 @@ def _cleanup_dedupe() -> None:
 
 def _log_event(source: str, event_type: str | None, target: str | None, mode: str,
                payload: dict, routed_to: str | None, status: str, error: str | None,
-               dedupe_key: str | None = None) -> int:
+               dedupe_key: str | None = None, workspace: str | None = None) -> int:
     """Insert an audit row, return its id so the caller can correlate it
     with a dedupe entry on the success path."""
     with db.get_db() as conn:
         cur = conn.execute(
-            """INSERT INTO events (source, event_type, target, mode, payload, routed_to, status, error, dedupe_key)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (source, event_type, target, mode, json.dumps(payload), routed_to, status, error, dedupe_key),
+            """INSERT INTO events (source, event_type, target, mode, payload, routed_to, status, error, dedupe_key, workspace)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (source, event_type, target, mode, json.dumps(payload), routed_to, status, error, dedupe_key, workspace),
         )
         return cur.lastrowid
 

@@ -51,8 +51,9 @@ def wired(tmp_path, monkeypatch):
 
     calls = {"routed": []}
 
-    async def fake_route(source, event_type, data, *, dry_run=False):
-        calls["routed"].append({"source": source, "data": data, "dry_run": dry_run})
+    async def fake_route(source, event_type, data, *, workspace=None, dry_run=False):
+        calls["routed"].append({"source": source, "data": data,
+                                "workspace": workspace, "dry_run": dry_run})
         return {"ok": True}
 
     monkeypatch.setattr(poller.core, "route_event", fake_route)
@@ -197,7 +198,7 @@ def test_route_failure_halts_cursor_and_keeps_old_state(tmp_path, monkeypatch):
     evs = _events((1, "2026-06-09T10:00:00Z"), (2, "2026-06-09T11:00:00Z"))
     monkeypatch.setattr(poller, "get_adapter", lambda system: _adapter(evs, state="etag-new"))
 
-    async def fail_second(source, event_type, data, *, dry_run=False):
+    async def fail_second(source, event_type, data, *, workspace=None, dry_run=False):
         return {"ok": True} if data["id"] == "1" else {"ok": False, "error": "spawn boom"}
 
     monkeypatch.setattr(poller.core, "route_event", fail_second)

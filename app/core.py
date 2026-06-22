@@ -18,10 +18,28 @@ failures — the poller inspects {ok} to decide whether to advance the cursor).
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
+from pathlib import Path
 
 from app import channels, spawn_helper
 from app import main as ingress  # reuse dedupe / audit / forward primitives
+
+# Multi-tenant: one dispatcher serves every workspace. When an event carries a
+# workspace (derived by the poller from the event-source's owning partition),
+# routing reads that workspace's channels.yaml + recipes and the spawned agent
+# runs with HOME = that workspace partition.
+WORKSPACES_ROOT = os.environ.get("DISPATCHER_WORKSPACES_ROOT", "")
+
+
+def _ws_paths(workspace: str | None):
+    """(channels_file, recipes_dir, home) for a workspace, or (None, None, None)
+    to fall back to the module-level defaults when there's no workspace/root."""
+    if workspace and WORKSPACES_ROOT:
+        part = Path(WORKSPACES_ROOT) / workspace
+        base = part / ".mindframe" / "dispatcher"
+        return base / "channels.yaml", base / "recipes", str(part)
+    return None, None, None
 
 
 def _payload(source: str, event_type: str | None, data) -> dict:
@@ -29,8 +47,12 @@ def _payload(source: str, event_type: str | None, data) -> dict:
     return {"source": source, "event_type": event_type, "data": data}
 
 
-async def route_event(source: str, event_type: str | None, data, *, dry_run: bool = False) -> dict:
+async def route_event(source: str, event_type: str | None, data, *,
+                      workspace: str | None = None, dry_run: bool = False) -> dict:
     """Route a single normalized event. Idempotent within the dedupe window.
+
+    workspace: the partition the event-source belongs to. Routing uses that
+    workspace's channels.yaml/recipes and the spawned agent runs in its HOME.
 
     dry_run: resolve the route and report the target, but forward/spawn nothing
     and write no dedupe entry — used by `poller --once --dry-run` to prove live
@@ -40,20 +62,25 @@ async def route_event(source: str, event_type: str | None, data, *, dry_run: boo
     payload = _payload(source, event_type, data)
     dedupe_key = ingress._compute_dedupe_key(source, data)
     ingress._cleanup_dedupe()
+    ch_file, rec_dir, ws_home = _ws_paths(workspace)
+
+    def _log(*a):
+        return ingress._log_event(*a, workspace=workspace)
 
     existing = ingress._find_dedupe_match(dedupe_key)
     if existing:
-        ingress._log_event(source, event_type, None, "poll-auto", payload,
-                           existing["routed_to"], "deduped", None, dedupe_key)
+        _log(source, event_type, None, "poll-auto", payload,
+             existing["routed_to"], "deduped", None, dedupe_key)
         return {"ok": True, "deduped": True, "routed_to": existing["routed_to"]}
 
-    route = channels.lookup_route(source, event_type)
+    route = channels.lookup_route(source, event_type, channels_file=ch_file)
     target = route.target if route else None
 
     if dry_run:
         return {
             "ok": True,
             "dry_run": True,
+            "workspace": workspace,
             "dedupe_key": dedupe_key,
             "would_route_to": target or f"session:{ingress.DISPATCHER_SESSION}",
         }
@@ -65,11 +92,11 @@ async def route_event(source: str, event_type: str | None, data, *, dry_run: boo
         try:
             await ingress._forward_to_session(session, text)
         except Exception as e:  # noqa: BLE001 — failure is reported, not raised
-            ingress._log_event(source, event_type, None, "poll-session", payload,
-                               session, "failed", str(e), dedupe_key)
+            _log(source, event_type, None, "poll-session", payload,
+                 session, "failed", str(e), dedupe_key)
             return {"ok": False, "error": str(e)}
-        eid = ingress._log_event(source, event_type, None, "poll-session", payload,
-                                 session, "forwarded", None, dedupe_key)
+        eid = _log(source, event_type, None, "poll-session", payload,
+                   session, "forwarded", None, dedupe_key)
         ingress._record_dedupe(dedupe_key, eid, session)
         return {"ok": True, "mode": "poll-session", "routed_to": session}
 
@@ -77,22 +104,24 @@ async def route_event(source: str, event_type: str | None, data, *, dry_run: boo
     if target and target.startswith("spawn:"):
         recipe_id = target.split(":", 1)[1]
         ev_id = dedupe_key.split(":", 1)[1] if ":" in dedupe_key else dedupe_key
-        audit_id = ingress._log_event(source, event_type, None, "poll-spawn", payload,
-                                      target, "forwarded", None, dedupe_key)
+        audit_id = _log(source, event_type, None, "poll-spawn", payload,
+                        target, "forwarded", None, dedupe_key)
         result = await spawn_helper.spawn_recipe(
             recipe_id=recipe_id,
             payload=data,
             event_id=ev_id,
             brief_overrides=route.brief,
+            recipes_dir=rec_dir,
+            home=ws_home,
         )
         if result.get("ok"):
-            ingress._log_event(source, event_type, result.get("task_id"), "poll-spawn-result",
-                               payload, f"spawn:{recipe_id}", "spawned", None, dedupe_key)
+            _log(source, event_type, result.get("task_id"), "poll-spawn-result",
+                 payload, f"spawn:{recipe_id}", "spawned", None, dedupe_key)
             ingress._record_dedupe(dedupe_key, audit_id, f"spawn:{recipe_id}")
             return {"ok": True, "mode": "poll-spawn", "routed_to": target,
-                    "task_id": result.get("task_id")}
-        ingress._log_event(source, event_type, None, "poll-spawn-result", payload,
-                           f"spawn:{recipe_id}", "spawn-failed", result.get("error"), dedupe_key)
+                    "workspace": workspace, "task_id": result.get("task_id")}
+        _log(source, event_type, None, "poll-spawn-result", payload,
+             f"spawn:{recipe_id}", "spawn-failed", result.get("error"), dedupe_key)
         return {"ok": False, "error": result.get("error")}
 
     # Unmapped → LLM dispatcher session (existing fallback behavior).
@@ -100,10 +129,10 @@ async def route_event(source: str, event_type: str | None, data, *, dry_run: boo
     try:
         await ingress._forward_to_session(ingress.DISPATCHER_SESSION, text)
     except Exception as e:  # noqa: BLE001
-        ingress._log_event(source, event_type, None, "poll-auto", payload,
-                           ingress.DISPATCHER_SESSION, "failed", str(e), dedupe_key)
+        _log(source, event_type, None, "poll-auto", payload,
+             ingress.DISPATCHER_SESSION, "failed", str(e), dedupe_key)
         return {"ok": False, "error": str(e)}
-    eid = ingress._log_event(source, event_type, None, "poll-auto", payload,
-                             ingress.DISPATCHER_SESSION, "forwarded", None, dedupe_key)
+    eid = _log(source, event_type, None, "poll-auto", payload,
+               ingress.DISPATCHER_SESSION, "forwarded", None, dedupe_key)
     ingress._record_dedupe(dedupe_key, eid, ingress.DISPATCHER_SESSION)
     return {"ok": True, "mode": "poll-auto", "routed_to": ingress.DISPATCHER_SESSION}

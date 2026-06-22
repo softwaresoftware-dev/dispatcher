@@ -41,7 +41,8 @@ def core_env(monkeypatch, tmp_path):
 def test_spawn_route_spawns_and_dedupes(core_env, monkeypatch):
     core, main, _ = core_env
 
-    async def fake_spawn(*, recipe_id, payload, event_id, brief_overrides=None):
+    async def fake_spawn(*, recipe_id, payload, event_id, brief_overrides=None,
+                         recipes_dir=None, home=None):
         return {"ok": True, "task_id": f"{recipe_id}-{event_id}"}
 
     monkeypatch.setattr(core.spawn_helper, "spawn_recipe", fake_spawn)
@@ -109,7 +110,8 @@ def test_unmapped_falls_back_to_dispatcher_session(core_env, monkeypatch):
 def test_spawn_failure_reports_not_raises(core_env, monkeypatch):
     core, main, _ = core_env
 
-    async def fail_spawn(*, recipe_id, payload, event_id, brief_overrides=None):
+    async def fail_spawn(*, recipe_id, payload, event_id, brief_overrides=None,
+                         recipes_dir=None, home=None):
         return {"ok": False, "error": "taskpilot down"}
 
     monkeypatch.setattr(core.spawn_helper, "spawn_recipe", fail_spawn)

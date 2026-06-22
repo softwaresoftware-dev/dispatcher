@@ -76,13 +76,17 @@ def load_routes(path: Path | None = None) -> list[Route]:
     return out
 
 
-def lookup_route(source: str, event_type: str | None) -> Route | None:
+def lookup_route(source: str, event_type: str | None,
+                 channels_file: Path | None = None) -> Route | None:
     """Find the first matching Route, or None.
 
     Match rules: source must match exactly. event_type matches if the route
     has the same event_type, or if the route omits event_type (wildcard).
+
+    channels_file: read routes from this workspace's channels.yaml instead of
+    the global default — set by the multi-tenant poller per event.
     """
-    for route in load_routes():
+    for route in load_routes(channels_file):
         if route.source != source:
             continue
         if route.event_type is None or route.event_type == event_type:

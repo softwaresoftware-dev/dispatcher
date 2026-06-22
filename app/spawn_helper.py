@@ -144,6 +144,7 @@ async def spawn_recipe(
     brief_overrides: dict | None = None,
     recipes_dir: Path | None = None,
     taskpilot_daemon_url: str | None = None,
+    home: str | None = None,
 ) -> dict:
     """Spawn an ephemeral taskpilot agent from a recipe.
 
@@ -218,6 +219,10 @@ async def spawn_recipe(
         spawn_body["model"] = model
     if composed_brief is not None:
         spawn_body["brief"] = composed_brief
+    if home:
+        # run the agent in its workspace partition (taskpilot per-task HOME), so
+        # it loads that workspace's MCPs / connector skills / vault
+        spawn_body["home"] = home
 
     url = (taskpilot_daemon_url or TASKPILOT_DAEMON_URL).rstrip("/") + "/tasks/create_and_spawn"
     try:

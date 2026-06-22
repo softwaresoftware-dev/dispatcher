@@ -47,15 +47,18 @@ async def tick(*, dry_run: bool = False) -> dict:
     cursors.init()
     summary: dict = {"sources": 0, "new_events": 0, "routed": 0, "errors": 0, "details": []}
 
-    for src in event_sources.load_sources():
+    for src in event_sources.load_all_sources():
         summary["sources"] += 1
+        # cursor key namespaced by workspace so two workspaces can watch the same
+        # source name without clobbering each other's watermark
+        key = f"{src.workspace}:{src.name}" if src.workspace else src.name
         adapter = get_adapter(src.system)
         if adapter is None:
             log.warning("no adapter for system '%s' (source %s)", src.system, src.name)
             summary["details"].append({"source": src.name, "skipped": f"no adapter for {src.system}"})
             continue
 
-        last_seen, last_id, state = cursors.get(src.name)
+        last_seen, last_id, state = cursors.get(key)
         first_sight = last_id is None
         try:
             events, meta = await adapter(src, last_seen, last_id, state)
@@ -75,13 +78,13 @@ async def tick(*, dry_run: bool = False) -> dict:
         if first_sight and not BACKFILL:
             if not dry_run:
                 if newest:
-                    cursors.advance(src.name, newest.get("created_at") or "", newest["id"])
+                    cursors.advance(key, newest.get("created_at") or "", newest["id"])
                 else:
                     # Empty feed — start from the beginning so the first event
                     # that ever appears gets routed.
-                    cursors.advance(src.name, "", "0")
+                    cursors.advance(key, "", "0")
                 if new_state:
-                    cursors.set_state(src.name, new_state)
+                    cursors.set_state(key, new_state)
             log.info("source %s: cold start — watermark set to %s, %d historical "
                      "item(s) skipped (set DISPATCHER_POLL_BACKFILL=1 to replay)",
                      src.name, (newest or {}).get("created_at"), len(events))
@@ -100,12 +103,12 @@ async def tick(*, dry_run: bool = False) -> dict:
         for ev in events:
             # Route under the source's `system` (e.g. "github") — that is what
             # channels.yaml matches on, not the event-source name.
-            res = await core.route_event(src.system, ev["event_type"], ev["data"], dry_run=dry_run)
+            res = await core.route_event(src.system, ev["event_type"], ev["data"], workspace=src.workspace, dry_run=dry_run)
             if res.get("ok"):
                 routed_here += 1
                 summary["routed"] += 1
                 if not dry_run:
-                    cursors.advance(src.name, ev["created_at"], ev["id"])
+                    cursors.advance(key, ev["created_at"], ev["id"])
             else:
                 all_routed = False
                 summary["errors"] += 1
@@ -118,16 +121,16 @@ async def tick(*, dry_run: bool = False) -> dict:
         # next tick's 304 hide the unrouted tail.
         if not dry_run and all_routed:
             if newest:
-                cursors.advance(src.name, newest.get("created_at") or "", newest["id"])
+                cursors.advance(key, newest.get("created_at") or "", newest["id"])
             if new_state:
-                cursors.set_state(src.name, new_state)
+                cursors.set_state(key, new_state)
 
         summary["details"].append({
             "source": src.name,
             "system": src.system,
             "new_events": len(events),
             "routed": routed_here,
-            "cursor": cursors.get(src.name)[0],
+            "cursor": cursors.get(key)[0],
         })
 
     return summary
