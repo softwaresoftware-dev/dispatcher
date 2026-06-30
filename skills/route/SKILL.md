@@ -9,7 +9,7 @@ The dispatcher's static routing table lives at `$INSTALL_DIR/channels.yaml` (whe
 
 ## Inputs to gather (ask the user if missing)
 
-- **source** — string identifying the event origin, e.g. `sentry`, `github`, `softwaresoftware-relay`. The integration must POST with this in its event payload.
+- **source** — string identifying the event origin, e.g. `github`, `schedule`. It matches the `system` of an event-source the poller reads. For time-based triggers use `source: schedule` (see *Schedule triggers* below).
 - **event_type** — string. Optional — omit to match any event_type from that source.
 - **target** — `session:<name>` (forward to a long-running session via session-bridge) or `spawn:<recipe>` (taskpilot spawns a fresh agent per event using `~/.dispatcher/recipes/<recipe>/`).
 
@@ -20,6 +20,24 @@ The dispatcher's static routing table lives at `$INSTALL_DIR/channels.yaml` (whe
 3. **For `spawn:<recipe>` targets,** verify `$INSTALL_DIR/recipes/<recipe>/` exists. If not, scaffold it (mkdir + an empty `recipe.yaml`, `brief.json`, and `CLAUDE.md` placeholder) and tell the user the recipe still needs to be filled in before spawned agents will be useful.
 4. **Restart the dispatcher daemon.** Use an available skill or tool from the `daemon` capability provider. Pass it the service name `dispatcher`. If no daemon provider is available, tell the user to restart it manually.
 5. **Confirm the change.** Re-read `channels.yaml` and echo back the final routes table.
+
+## Schedule (time) triggers
+
+To fire an agent on a clock — "every morning", "hourly" — pair a `source: schedule`
+route with a **schedule event-source** in the workspace's
+`.mindframe/dispatcher/event-sources/<name>.yaml`:
+
+```yaml
+name: morning-review
+system: schedule
+schedule:
+  cron: "0 7 * * *"            # 5-field cron (or @daily/@hourly/…); operator-local time
+  event_type: morning-review   # optional; defaults to the source name
+```
+
+The route is then `source: schedule, event_type: morning-review → spawn:<recipe>`.
+The poller's `schedule` adapter emits a synthetic event when the cron is due
+(coalescing missed runs on recovery, ~25h cap) — no OS cron, no webhook.
 
 ## `spawn:` routes — brief overrides vs. event data
 

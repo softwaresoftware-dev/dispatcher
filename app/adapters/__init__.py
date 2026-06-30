@@ -34,10 +34,11 @@ Adapters accept a keyword-only injection seam (`fetch=` for HTTP adapters) so
 tests can feed canned responses. Production callers leave it unset.
 """
 
-from app.adapters import github
+from app.adapters import github, schedule
 
 _ADAPTERS = {
     "github": github.poll,
+    "schedule": schedule.poll,
 }
 
 
