@@ -26,13 +26,13 @@ provider any consumer can use; mindframe is one such consumer. See
 | `skills/` | `setup`, `route`, `validate-agent` |
 | `app/poller.py` | **poll-first ingestion (primary)** — loop over event-sources, route new items |
 | `app/event_sources.py` | load `event-sources/*.yaml` declarations |
-| `app/adapters/` | one poll adapter per `system` (`github` → org Events API over httpx, ETag conditional requests) |
+| `app/adapters/` | one poll adapter per `system` (`github` → org Events API over httpx; `schedule` → cron, emits a synthetic event when due) |
 | `app/cursors.py` | per-source poll watermark (`cursors.db`); migrates legacy schema |
 | `app/core.py` | shared routing core — dedupe, channels lookup, forward/spawn, audit |
 | `app/main.py` | dispatcher-ingress FastAPI service (`/api/direct`, `/api/events`, `/api/health`) + shared dedupe/audit/forward primitives |
 | `lib/agent_def.py` | the agent-definition format contract + validator (also a CLI) |
 | `agents/` | seed agent definitions (`<name>.agent.md` + `<name>.binding.yaml`) |
-| `tests/` | pytest suite — `api`, `channels`, `spawn`, `agent_def`, `poller`, `core`, `cursors`, `github_adapter` |
+| `tests/` | pytest suite — `api`, `channels`, `spawn`, `agent_def`, `poller`, `core`, `cursors`, `github_adapter`, `schedule_adapter` |
 
 ## What it does
 
