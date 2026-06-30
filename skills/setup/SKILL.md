@@ -9,8 +9,7 @@ You are installing the dispatcher event-routing daemons on this machine. The
 code is **bundled in this plugin** (`${CLAUDE_PLUGIN_ROOT}/app/`) — there is
 nothing to clone. Setup creates a runtime directory and a venv, then registers
 two managed daemons: the **poller** (poll-first ingestion, the primary path)
-and the **ingress** service (`/api/direct`, `/api/events`, `/api/health`, plus
-the deprecated `/api/event` webhook).
+and the **ingress** service (`/api/direct`, `/api/events`, `/api/health`).
 
 The customer has provided a bearer token in `CLAUDE_PLUGIN_OPTION_BEARER_TOKEN`.
 Other config:
@@ -81,13 +80,10 @@ then run `/reload-plugins`.
    Verify by tailing the daemon's log for a `poller started` line; a tick
    against zero sources is a clean no-op.
 
-7. **Public URL (optional).** If a `deploy` capability provider is loaded, ask
-   the user whether to expose the dispatcher publicly. If yes, use that
-   provider's deploy skill to put `127.0.0.1:$PORT` behind an HTTPS hostname.
-   Save the resulting URL where the user can find it. If no `deploy` provider
-   is loaded, skip this step and tell the user the dispatcher is reachable only
-   on the local network — they need their own ingress to receive
-   Sentry/GitHub/etc. webhooks.
+7. **No public URL needed.** Ingestion is poll-first — the dispatcher pulls
+   from each source on an interval, so nothing inbound needs exposing. The
+   ingress endpoints (`/api/direct`, `/api/events`, `/api/health`) are
+   operator-facing on localhost.
 
 ## What to report back
 

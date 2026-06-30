@@ -41,7 +41,7 @@ routes:
     # do NOT try to map event data fields here.
 ```
 
-Event POSTed to `/api/event`:
+An event the poller ingests (e.g. from a calendar event-source):
 
 ```json
 {"source": "calendar", "event_type": "meeting-prep",
