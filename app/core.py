@@ -1,6 +1,6 @@
-"""Routing core shared by the (deprecated) webhook ingress and the poller.
+"""Routing core for the dispatcher's poll-first ingestion.
 
-`route_event` runs the same decision tree as the /api/event handler — dedupe,
+`route_event` runs the routing decision tree — dedupe,
 static channels.yaml lookup, forward-to-session / spawn-recipe / LLM-fallback,
 audit — but awaits spawn inline (no BackgroundTasks), because the poller is not
 in an HTTP hot path: it wants the spawn outcome *before* it advances its cursor,

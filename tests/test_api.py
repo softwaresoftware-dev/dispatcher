@@ -25,11 +25,6 @@ def test_health(client):
     assert client.get("/api/health").json() == {"ok": True}
 
 
-def test_event_requires_token(client):
-    r = client.post("/api/event", json={"source": "sentry", "data": {"msg": "boom"}})
-    assert r.status_code == 401
-
-
 def test_bearer_from_file(tmp_path, monkeypatch):
     """DISPATCHER_INGEST_TOKEN_FILE lets the install.txt PHASE 7.6 workflow
     actually authenticate. Without this, the bearer file written by setup
@@ -95,97 +90,6 @@ def test_event_uses_bearer_file(tmp_path, monkeypatch):
         assert r.status_code == 403
 
 
-def test_event_bad_token(client):
-    r = client.post(
-        "/api/event",
-        json={"source": "sentry", "data": {}},
-        headers={"Authorization": "Bearer wrong"},
-    )
-    assert r.status_code == 403
-
-
-def test_event_forwards_to_session_bridge(client, monkeypatch):
-    # Stub the network call so we don't actually need session-bridge running
-    captured = {}
-
-    class StubClient:
-        def __init__(self, *a, **kw): pass
-        async def __aenter__(self): return self
-        async def __aexit__(self, *a): pass
-        async def post(self, url, json=None):
-            captured["url"] = url
-            captured["json"] = json
-            class R:
-                status_code = 200
-                def json(self): return {"sent": json["text"], "session": "dispatcher"}
-            return R()
-
-    monkeypatch.setattr("app.main.httpx.AsyncClient", StubClient)
-
-    r = client.post(
-        "/api/event",
-        json={"source": "sentry", "event_type": "error", "data": {"msg": "boom"}},
-        headers={"Authorization": "Bearer test-token"},
-    )
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["ok"] is True
-    assert body["routed_to"] == "dispatcher"
-    assert "/sessions/dispatcher/message" in captured["url"]
-    assert "sentry" in captured["json"]["text"]
-    assert "boom" in captured["json"]["text"]
-
-
-def test_event_rejects_payload_field(client):
-    """The API field is `data`, not `payload`. A POST that sends `payload`
-    must 422 rather than silently dropping the value and substituting an
-    empty {payload} downstream (extra='forbid' on EventBody)."""
-    r = client.post(
-        "/api/event",
-        json={"source": "calendar", "event_type": "meeting-prep",
-              "payload": {"meeting_title": "Q3 review"}},
-        headers={"Authorization": "Bearer test-token"},
-    )
-    assert r.status_code == 422, r.text
-
-
-def test_event_rejects_arbitrary_unknown_field(client):
-    """Any field outside source/event_type/data is rejected."""
-    r = client.post(
-        "/api/event",
-        json={"source": "sentry", "data": {"msg": "boom"}, "bogus": 1},
-        headers={"Authorization": "Bearer test-token"},
-    )
-    assert r.status_code == 422, r.text
-
-
-def test_event_accepts_correct_data_field(client, monkeypatch):
-    """A correct POST using `data` still works."""
-    captured = {}
-
-    class StubClient:
-        def __init__(self, *a, **kw): pass
-        async def __aenter__(self): return self
-        async def __aexit__(self, *a): pass
-        async def post(self, url, json=None):
-            captured["json"] = json
-            class R:
-                status_code = 200
-                def json(self): return {"ok": True}
-            return R()
-
-    monkeypatch.setattr("app.main.httpx.AsyncClient", StubClient)
-
-    r = client.post(
-        "/api/event",
-        json={"source": "calendar", "event_type": "meeting-prep",
-              "data": {"meeting_title": "Q3 review"}},
-        headers={"Authorization": "Bearer test-token"},
-    )
-    assert r.status_code == 200, r.text
-    assert r.json()["ok"] is True
-
-
 def test_direct_forwards_to_named_session(client, monkeypatch):
     captured = {}
 
@@ -215,100 +119,6 @@ def test_audit_log_requires_auth(client):
     assert client.get("/api/events").status_code == 401
 
 
-def test_dedupe_short_circuits_repeat_event(client, monkeypatch):
-    """Same source + event_id within window forwards once, dedupes on retry."""
-    forward_count = {"n": 0}
-
-    class StubClient:
-        def __init__(self, *a, **kw): pass
-        async def __aenter__(self): return self
-        async def __aexit__(self, *a): pass
-        async def post(self, url, json=None):
-            forward_count["n"] += 1
-            class R:
-                status_code = 200
-                def json(self): return {}
-            return R()
-
-    monkeypatch.setattr("app.main.httpx.AsyncClient", StubClient)
-
-    payload = {
-        "source": "sentry",
-        "event_type": "error",
-        "data": {"event_id": "abc123", "title": "boom"},
-    }
-    headers = {"Authorization": "Bearer test-token"}
-
-    r1 = client.post("/api/event", json=payload, headers=headers)
-    assert r1.status_code == 200
-    assert r1.json().get("deduped") is None
-    assert forward_count["n"] == 1
-
-    r2 = client.post("/api/event", json=payload, headers=headers)
-    assert r2.status_code == 200
-    body = r2.json()
-    assert body["deduped"] is True
-    assert body["routed_to"] == "dispatcher"
-    assert "original_event_id" in body
-    assert forward_count["n"] == 1, "duplicate must not re-forward"
-
-    events = client.get("/api/events", headers=headers).json()
-    assert len(events) == 2
-    statuses = sorted(e["status"] for e in events)
-    assert statuses == ["deduped", "forwarded"]
-
-
-def test_dedupe_distinguishes_different_event_ids(client, monkeypatch):
-    forward_count = {"n": 0}
-
-    class StubClient:
-        def __init__(self, *a, **kw): pass
-        async def __aenter__(self): return self
-        async def __aexit__(self, *a): pass
-        async def post(self, url, json=None):
-            forward_count["n"] += 1
-            class R:
-                status_code = 200
-                def json(self): return {}
-            return R()
-
-    monkeypatch.setattr("app.main.httpx.AsyncClient", StubClient)
-    headers = {"Authorization": "Bearer test-token"}
-
-    client.post("/api/event",
-                json={"source": "sentry", "data": {"event_id": "aaa"}},
-                headers=headers)
-    client.post("/api/event",
-                json={"source": "sentry", "data": {"event_id": "bbb"}},
-                headers=headers)
-
-    assert forward_count["n"] == 2
-
-
-def test_dedupe_falls_back_to_payload_hash_without_event_id(client, monkeypatch):
-    forward_count = {"n": 0}
-
-    class StubClient:
-        def __init__(self, *a, **kw): pass
-        async def __aenter__(self): return self
-        async def __aexit__(self, *a): pass
-        async def post(self, url, json=None):
-            forward_count["n"] += 1
-            class R:
-                status_code = 200
-                def json(self): return {}
-            return R()
-
-    monkeypatch.setattr("app.main.httpx.AsyncClient", StubClient)
-    headers = {"Authorization": "Bearer test-token"}
-    body = {"source": "weird", "data": {"msg": "no id field"}}
-
-    client.post("/api/event", json=body, headers=headers)
-    client.post("/api/event", json=body, headers=headers)
-
-    assert forward_count["n"] == 1, "identical payloads should dedupe via hash fallback"
-
-
 def test_audit_log_records_attempts(client, monkeypatch):
     class StubClient:
         def __init__(self, *a, **kw): pass
@@ -321,16 +131,16 @@ def test_audit_log_records_attempts(client, monkeypatch):
             return R()
     monkeypatch.setattr("app.main.httpx.AsyncClient", StubClient)
 
-    client.post("/api/event",
-                json={"source": "sentry", "data": {}},
-                headers={"Authorization": "Bearer test-token"})
     client.post("/api/direct/librarian",
-                json={"text": "hi"},
+                json={"text": "hi", "source": "sentry"},
+                headers={"Authorization": "Bearer test-token"})
+    client.post("/api/direct/archivist",
+                json={"text": "yo", "source": "phone"},
                 headers={"Authorization": "Bearer test-token"})
 
     events = client.get("/api/events", headers={"Authorization": "Bearer test-token"}).json()
     assert len(events) == 2
-    assert {e["mode"] for e in events} == {"auto", "direct"}
+    assert {e["mode"] for e in events} == {"direct"}
     assert all(e["status"] == "forwarded" for e in events)
 
 
@@ -392,13 +202,13 @@ def test_events_filter_by_status(client, monkeypatch):
     monkeypatch.setattr("app.main.httpx.AsyncClient", StubClient)
 
     # one forwarded event
-    client.post("/api/event", json={"source": "sentry", "data": {}}, headers=headers)
+    client.post("/api/direct/librarian", json={"text": "x", "source": "sentry"}, headers=headers)
 
     # one failed event by raising a non-HTTPException inside the forward
     async def _explode(*a, **kw):
         raise RuntimeError("forward failed")
     monkeypatch.setattr("app.main._forward_to_session", _explode)
-    client.post("/api/event", json={"source": "github", "data": {}}, headers=headers)
+    client.post("/api/direct/librarian", json={"text": "x", "source": "github"}, headers=headers)
 
     forwarded = client.get("/api/events?status=forwarded", headers=headers).json()
     failed = client.get("/api/events?status=failed", headers=headers).json()
@@ -423,7 +233,7 @@ def test_events_summary_groups_by_status(client, monkeypatch):
     monkeypatch.setattr("app.main.httpx.AsyncClient", StubClient)
 
     for src in ("a", "b", "c"):
-        client.post("/api/event", json={"source": src, "data": {}}, headers=headers)
+        client.post("/api/direct/librarian", json={"text": "x", "source": src}, headers=headers)
 
     summary = client.get("/api/events/summary", headers=headers).json()
     assert summary == {"forwarded": 3}

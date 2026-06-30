@@ -1,8 +1,8 @@
 """The poller — poll-first ingestion for the dispatcher.
 
-Poll-first is now the PRIMARY ingestion path; the /api/event webhook is
-deprecated. On a NAT'd host there is no public endpoint for GitHub (or anyone)
-to call, so the dispatcher reaches out on an interval instead.
+Poll-first is the dispatcher's ingestion path (the /api/event webhook was
+removed). On a NAT'd host there is no public endpoint for GitHub (or anyone) to
+call, so the dispatcher reaches out on an interval instead.
 
 On each tick: load Event Source declarations, dispatch each to its system
 adapter, route every item newer than that source's cursor through the shared
